@@ -184,18 +184,16 @@ func bootstrapAdmin(ctx context.Context, database *db.DB, cfg config.BootstrapAd
 
 // installYtdlp makes sure a yt-dlp binary is available: one already in the
 // go-ytdlp cache (a volume in Docker) or on PATH is used as is, otherwise the
-// release is downloaded into the cache. AllowVersionMismatch: go-ytdlp pins an
-// old release, and the self-update below must not be undone on next start.
+// release is downloaded into the cache (see ytdl.EnsureBinary for why the
+// download is not left to go-ytdlp). The self-update below then moves it to
+// the latest release; the cached binary is kept across restarts.
 func installYtdlp(ctx context.Context, log *slog.Logger) error {
 	start := time.Now()
-	res, err := ytdlp.Install(ctx, &ytdlp.InstallOptions{AllowVersionMismatch: true})
+	path, err := ytdl.EnsureBinary(ctx, log.With(slog.String("component", "ytdl")))
 	if err != nil {
 		return fmt.Errorf("yt-dlp install: %w", err)
 	}
-	log.Info("yt-dlp binary ready",
-		slog.String("path", res.Executable),
-		slog.Bool("downloaded", res.Downloaded),
-		slog.Duration("elapsed", time.Since(start)))
+	log.Info("yt-dlp binary ready", slog.String("path", path), slog.Duration("elapsed", time.Since(start)))
 	return nil
 }
 

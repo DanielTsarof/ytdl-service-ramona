@@ -77,6 +77,10 @@ services:
       timeout: 5s
       retries: 20
     logging: *logging
+    # Host access for tools (psql, IDEs); localhost only. The app itself
+    # connects over the compose network and does not need this.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
 
   redis:
     image: redis:7-alpine
