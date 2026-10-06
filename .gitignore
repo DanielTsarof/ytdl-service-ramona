@@ -1,0 +1,16 @@
+# Secrets: DATABASE_URL, cookies, S3 settings
+.env
+*.cookies.txt
+
+# Local storage backend default (STORAGE_LOCAL_DIR=./data)
+/data/
+
+# Go
+*.test
+*.out
+/bin/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

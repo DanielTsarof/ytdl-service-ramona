@@ -1,15 +1,20 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Config struct {
+	// DatabaseURL: PostgreSQL connection string, URL or keyword/value form
+	// (postgres://user:pass@host:5432/db?sslmode=disable).
+	DatabaseURL string `env:"DATABASE_URL" env-required:"true"`
 	// YtdlpCookies: path to a Netscape-format cookies.txt passed to yt-dlp (empty = off).
 	YtdlpCookies string `env:"YTDLP_COOKIES"`
 	// WorkDir holds per-job scratch directories while yt-dlp downloads and
@@ -64,10 +69,11 @@ func (c *Config) MaxDuration() time.Duration {
 }
 
 // LogAttrs returns the effective configuration for the startup log line.
-// Credentials never live here (they come from the AWS chain), so nothing
-// needs redacting.
+// The database password is never included; AWS credentials never live here
+// (they come from the AWS chain).
 func (c *Config) LogAttrs() []any {
 	return []any{
+		slog.String("database", databaseLabel(c.DatabaseURL)),
 		slog.String("ytdlp_cookies", c.YtdlpCookies),
 		slog.String("work_dir", c.WorkDir),
 		slog.Int("max_duration_seconds", c.MaxDurationSeconds),
@@ -81,4 +87,17 @@ func (c *Config) LogAttrs() []any {
 		slog.Bool("s3_path_style", c.Storage.S3PathStyle),
 		slog.String("s3_prefix", c.Storage.S3Prefix),
 	}
+}
+
+// databaseLabel renders a connection string as user@host:port/db for logs,
+// dropping the password whichever DSN form was used.
+func databaseLabel(dsn string) string {
+	if dsn == "" {
+		return "missing"
+	}
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return "unparseable"
+	}
+	return fmt.Sprintf("%s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
 }
