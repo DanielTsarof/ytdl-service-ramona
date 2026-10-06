@@ -244,6 +244,8 @@ func (e *env) do(method, path, key, body string, hdr ...string) *httptest.Respon
 	}
 	w := httptest.NewRecorder()
 	e.handler.ServeHTTP(w, req)
+	// Every response the tests see must match the documented contract.
+	validateResponse(e.t, req, w)
 	return w
 }
 

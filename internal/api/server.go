@@ -36,6 +36,7 @@ type Server struct {
 	cfg     Config
 	log     *slog.Logger
 	now     func() time.Time
+	spec    spec
 }
 
 func New(a *app.App, rdb *redis.Client, waker Waker, cfg Config, logger *slog.Logger) *Server {
@@ -49,6 +50,7 @@ func New(a *app.App, rdb *redis.Client, waker Waker, cfg Config, logger *slog.Lo
 		cfg:     cfg,
 		log:     logger,
 		now:     time.Now,
+		spec:    mustSpec(),
 	}
 }
 
@@ -63,6 +65,11 @@ func (s *Server) Handler() http.Handler {
 
 	r.GET("/healthz", s.healthz)
 	r.GET("/readyz", s.readyz)
+
+	// API description and interactive docs (public).
+	r.GET("/openapi.yaml", s.spec.serve("application/yaml", s.spec.yaml))
+	r.GET("/openapi.json", s.spec.serve("application/json", s.spec.json))
+	r.GET("/docs", s.docs)
 
 	v1 := r.Group("/v1", s.authenticate(), s.rateLimit())
 

@@ -1,0 +1,1383 @@
+openapi: 3.0.3
+info:
+  title: ytdl-service API
+  version: 1.0.0
+  description: |
+    Downloads media with yt-dlp and serves it as MP4, MP3 or WAV files, live
+    streams, or asynchronous tasks delivered by webhook.
+
+    **Authentication.** Every `/v1` endpoint needs an API key, sent as
+    `Authorization: Bearer ytdl_…` or `X-API-Key: ytdl_…`. Keys are issued by
+    administrators and shown only once.
+
+    **Roles.** Users can retrieve media, manage their own tasks, and read their
+    own account and request history. Everything that changes data (users, API
+    keys, catalog) and everything not owned by the caller needs the `admin`
+    role.
+
+    **Choosing the source.** Retrieval endpoints take `url` (a link) or `name`
+    (a search query). When both are given, `url` wins.
+
+    **Storage.** Retrieved files are stored and never downloaded twice. Files
+    not requested for the configured idle period (default 7 days) are deleted
+    and are downloaded again on the next request.
+
+    **Idempotency.** `GET /v1/files` is idempotent. For `POST /v1/tasks`, an
+    `Idempotency-Key` header makes a repeat return the same task. Without the
+    header, an identical request returns the existing task while it is running
+    or its result is still downloadable.
+
+    **Rate limits** are per API key; exceeding them returns `429` with
+    `Retry-After`. **Read responses** (lists, history, `/v1/me`) may be served
+    from a short-lived cache, reported in `X-Cache`.
+
+    **Errors** always have the body `{"error": {"code": "...", "message": "..."}}`.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+tags:
+  - name: Retrieval
+    description: Get a file synchronously or stream it.
+  - name: Tasks
+    description: Asynchronous retrieval with optional webhook delivery.
+  - name: Account
+    description: The caller's own account.
+  - name: History
+    description: Request history.
+  - name: Users
+    description: User administration (admin only).
+  - name: API keys
+    description: API key administration (admin only).
+  - name: Catalog
+    description: Stored media (admin only).
+  - name: Health
+  - name: Docs
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: healthz
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readyz
+      summary: Readiness probe (database and Redis)
+      security: []
+      responses:
+        "200":
+          description: All dependencies answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: At least one dependency is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /openapi.yaml:
+    get:
+      tags: [Docs]
+      operationId: openapiYAML
+      summary: This specification (YAML)
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema: { type: string }
+        "304": { $ref: "#/components/responses/NotModified" }
+
+  /openapi.json:
+    get:
+      tags: [Docs]
+      operationId: openapiJSON
+      summary: This specification (JSON)
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/json:
+              schema: { type: object }
+        "304": { $ref: "#/components/responses/NotModified" }
+
+  /docs:
+    get:
+      tags: [Docs]
+      operationId: docs
+      summary: Interactive API documentation (Swagger UI)
+      security: []
+      responses:
+        "200":
+          description: HTML page.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /v1/files:
+    get:
+      tags: [Retrieval]
+      operationId: getFile
+      summary: Get a media file
+      description: |
+        Returns the file for `url` or `name` in `format`, downloading it first
+        if it is not stored yet (this can take a while; use `POST /v1/tasks`
+        for long media). A stored file is served directly, with `Range` and
+        conditional request support.
+      parameters:
+        - $ref: "#/components/parameters/SourceURL"
+        - $ref: "#/components/parameters/SourceName"
+        - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "206": { $ref: "#/components/responses/PartialFile" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+        "422": { $ref: "#/components/responses/MediaRejected" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "502": { $ref: "#/components/responses/UpstreamFailed" }
+    head:
+      tags: [Retrieval]
+      operationId: headFile
+      summary: Get a media file's headers
+      description: Same as GET without the body. Downloads the file if it is not stored yet.
+      parameters:
+        - $ref: "#/components/parameters/SourceURL"
+        - $ref: "#/components/parameters/SourceName"
+        - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/FileHead" }
+        "206": { $ref: "#/components/responses/FileHead" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400": { $ref: "#/components/responses/EmptyError" }
+        "401": { $ref: "#/components/responses/EmptyError" }
+        "404": { $ref: "#/components/responses/EmptyError" }
+        "416": { $ref: "#/components/responses/EmptyError" }
+        "422": { $ref: "#/components/responses/EmptyError" }
+        "429": { $ref: "#/components/responses/EmptyError" }
+        "500": { $ref: "#/components/responses/EmptyError" }
+        "502": { $ref: "#/components/responses/EmptyError" }
+
+  /v1/stream:
+    get:
+      tags: [Retrieval]
+      operationId: stream
+      summary: Stream media
+      description: |
+        Plays `url` or `name` in `format` as it is produced. A stored file is
+        served directly (seekable, `Range` supported). Otherwise ffmpeg
+        transcodes the source live into the response (chunked, not seekable,
+        not stored), so playback starts without waiting for a download.
+        Errors after the first byte truncate the stream instead of returning
+        an error body.
+      parameters:
+        - $ref: "#/components/parameters/SourceURL"
+        - $ref: "#/components/parameters/SourceName"
+        - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: The media, either the stored file or a live transcode.
+          headers:
+            X-Ytdl-Source-Id: { $ref: "#/components/headers/XYtdlSourceID" }
+            Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            audio/mpeg: { schema: { $ref: "#/components/schemas/Binary" } }
+            audio/wav: { schema: { $ref: "#/components/schemas/Binary" } }
+            video/mp4: { schema: { $ref: "#/components/schemas/Binary" } }
+        "206": { $ref: "#/components/responses/PartialFile" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+        "422": { $ref: "#/components/responses/MediaRejected" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "502": { $ref: "#/components/responses/UpstreamFailed" }
+
+  /v1/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Start an asynchronous retrieval
+      description: |
+        Queues the retrieval and returns immediately. Poll `status_url`, then
+        download `file_url` until `expires_at` (one hour after completion by
+        default). With `webhook_url`, the file is also POSTed there when ready
+        (see the callback). Webhook URLs must be public http(s) addresses.
+
+        Idempotent: with `Idempotency-Key`, a repeat returns the same task
+        (`200`, `Idempotent-Replayed: true`); reusing the key for a different
+        request returns `422`. Without the header, an identical request returns
+        the existing task while it is running or its file is downloadable.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTaskRequest" }
+            example:
+              url: https://www.youtube.com/watch?v=jNQXAC9IVRw
+              format: mp3
+              webhook_url: https://hooks.example.com/ytdl
+      responses:
+        "200":
+          description: An existing task was returned (idempotent replay).
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "202":
+          description: The task was queued.
+          headers:
+            Location:
+              description: The task's status URL.
+              schema: { type: string }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+      callbacks:
+        taskFinished:
+          "{$request.body#/webhook_url}":
+            post:
+              summary: Task result delivered to the webhook
+              description: |
+                Sent once the task finishes; retried with backoff (30s, 2m,
+                10m, 30m, 1h…) until a 2xx response or the attempt limit.
+
+                - `task.succeeded`: the body is the file itself.
+                - `task.failed`: the body is a JSON `WebhookFailedEvent`.
+
+                **Verifying the signature.** Compute the hex SHA-256 of the raw
+                body and compare it with `X-Ytdl-Content-Sha256`. Then take
+                `t` and `v1` from `X-Ytdl-Signature` and check that
+                `v1 == hex(HMAC-SHA256(webhook_secret, t + "." + task_id + "." + content_sha256))`
+                and that `t` is recent (e.g. within 5 minutes). Your webhook
+                secret is at `GET /v1/me/webhook-secret`.
+              parameters:
+                - { $ref: "#/components/parameters/WebhookTaskID" }
+                - { $ref: "#/components/parameters/WebhookEvent" }
+                - { $ref: "#/components/parameters/WebhookContentSHA256" }
+                - { $ref: "#/components/parameters/WebhookSignature" }
+                - name: X-Ytdl-Title
+                  in: header
+                  description: URL-encoded media title (succeeded events only).
+                  schema: { type: string }
+              requestBody:
+                required: true
+                content:
+                  audio/mpeg: { schema: { $ref: "#/components/schemas/Binary" } }
+                  audio/wav: { schema: { $ref: "#/components/schemas/Binary" } }
+                  video/mp4: { schema: { $ref: "#/components/schemas/Binary" } }
+                  application/json:
+                    schema: { $ref: "#/components/schemas/WebhookFailedEvent" }
+              responses:
+                "2XX":
+                  description: Delivery accepted; no retry.
+                default:
+                  description: Any other answer (or a timeout) is retried.
+
+  /v1/tasks/{id}:
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Get a task's status
+      description: Visible to its owner and to admins; anyone else gets `404`.
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: The task.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/tasks/{id}/file:
+    get:
+      tags: [Tasks]
+      operationId: getTaskFile
+      summary: Download a finished task's file
+      description: |
+        Available while the task has `succeeded` and before `expires_at`.
+        `409` while it is queued/running (with `Retry-After`) or if it failed;
+        `410` once the result has expired.
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "206": { $ref: "#/components/responses/PartialFile" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TaskNotReady" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    head:
+      tags: [Tasks]
+      operationId: headTaskFile
+      summary: Get a finished task's file headers
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/FileHead" }
+        "206": { $ref: "#/components/responses/FileHead" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400": { $ref: "#/components/responses/EmptyError" }
+        "401": { $ref: "#/components/responses/EmptyError" }
+        "404": { $ref: "#/components/responses/EmptyError" }
+        "409": { $ref: "#/components/responses/EmptyError" }
+        "410": { $ref: "#/components/responses/EmptyError" }
+        "416": { $ref: "#/components/responses/EmptyError" }
+        "429": { $ref: "#/components/responses/EmptyError" }
+        "500": { $ref: "#/components/responses/EmptyError" }
+
+  /v1/me:
+    get:
+      tags: [Account]
+      operationId: getMe
+      summary: The authenticated user
+      responses:
+        "200":
+          description: The caller's account.
+          headers:
+            X-Cache: { $ref: "#/components/headers/XCache" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/webhook-secret:
+    get:
+      tags: [Account]
+      operationId: getMyWebhookSecret
+      summary: The secret that signs your webhooks
+      responses:
+        "200": { $ref: "#/components/responses/WebhookSecret" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/webhook-secret/rotate:
+    post:
+      tags: [Account]
+      operationId: rotateMyWebhookSecret
+      summary: Replace your webhook secret
+      description: Webhooks sent after this are signed with the new secret.
+      responses:
+        "200": { $ref: "#/components/responses/WebhookSecret" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/history:
+    get:
+      tags: [History]
+      operationId: listHistory
+      summary: Request history
+      description: |
+        Retrieval requests (`/v1/files`, `/v1/stream`, `POST /v1/tasks`) with
+        pagination, filters and date sorting. Users always see their own
+        history; admins see everyone's, or one user's with `user_id`.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: kind
+          in: query
+          schema: { type: string, enum: [file, stream, task] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, ok, error] }
+        - name: format
+          in: query
+          schema: { type: string, enum: [mp4, mp3, wav] }
+        - name: from
+          in: query
+          description: Only requests at or after this moment. RFC 3339 or `YYYY-MM-DD` (midnight UTC).
+          schema: { type: string, example: "2026-10-01" }
+        - name: to
+          in: query
+          description: Only requests before this moment (exclusive). RFC 3339 or `YYYY-MM-DD`.
+          schema: { type: string, example: "2026-10-07T00:00:00Z" }
+        - name: q
+          in: query
+          description: Case-insensitive substring of the query, URL or title.
+          schema: { type: string, maxLength: 200 }
+        - name: sort
+          in: query
+          description: "`-created_at` (newest first) or `created_at` (oldest first)."
+          schema: { type: string, enum: [-created_at, created_at], default: -created_at }
+        - name: user_id
+          in: query
+          description: Admins only; users get `403` for any ID but their own.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: A page of history items.
+          headers:
+            X-Cache: { $ref: "#/components/headers/XCache" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HistoryPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List users
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of users.
+          headers:
+            X-Cache: { $ref: "#/components/headers/XCache" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Create a user and its first API key
+      description: The key's plaintext is in the response and is never shown again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+      responses:
+        "201":
+          description: The user and its first API key.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UserID"
+    get:
+      tags: [Users]
+      operationId: getUser
+      summary: Get a user
+      responses:
+        "200":
+          description: The user.
+          headers:
+            X-Cache: { $ref: "#/components/headers/XCache" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [Users]
+      operationId: updateUser
+      summary: Update a user
+      description: Omitted fields keep their value. Admins cannot remove their own admin role (`409`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserRequest" }
+      responses:
+        "200":
+          description: The updated user.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [Users]
+      operationId: deleteUser
+      summary: Delete a user
+      description: Also deletes the user's API keys, tasks and history. Admins cannot delete themselves (`409`).
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}/webhook-secret/rotate:
+    post:
+      tags: [Users]
+      operationId: rotateUserWebhookSecret
+      summary: Replace a user's webhook secret
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200": { $ref: "#/components/responses/WebhookSecret" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}/api-keys:
+    parameters:
+      - $ref: "#/components/parameters/UserID"
+    get:
+      tags: [API keys]
+      operationId: listAPIKeys
+      summary: List a user's API keys
+      description: Includes revoked keys. Never returns key material, only the prefix.
+      responses:
+        "200":
+          description: The user's keys.
+          headers:
+            X-Cache: { $ref: "#/components/headers/XCache" }
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/APIKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [API keys]
+      operationId: createAPIKey
+      summary: Issue a new API key
+      description: The plaintext key is in the response and is never shown again.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                  description: A label for the key.
+      responses:
+        "201": { $ref: "#/components/responses/IssuedAPIKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}/api-keys/revoke-all:
+    post:
+      tags: [API keys]
+      operationId: revokeAllAPIKeys
+      summary: Invalidate all of a user's keys
+      description: Admins cannot revoke all of their own keys (`409`).
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: How many active keys were revoked.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [revoked]
+                properties:
+                  revoked: { type: integer, format: int64, minimum: 0 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}/api-keys/{key_id}/revoke:
+    post:
+      tags: [API keys]
+      operationId: revokeAPIKey
+      summary: Invalidate one key
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/KeyID"
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/users/{id}/api-keys/{key_id}/refresh:
+    post:
+      tags: [API keys]
+      operationId: refreshAPIKey
+      summary: Replace a key
+      description: Revokes the key and issues a replacement with the same name, atomically.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/KeyID"
+      responses:
+        "200": { $ref: "#/components/responses/IssuedAPIKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/videos:
+    get:
+      tags: [Catalog]
+      operationId: listVideos
+      summary: List videos (MP4)
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200": { $ref: "#/components/responses/MediaPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/videos/{source_id}:
+    parameters:
+      - $ref: "#/components/parameters/SourceID"
+    get:
+      tags: [Catalog]
+      operationId: getVideo
+      summary: Get a video
+      responses:
+        "200": { $ref: "#/components/responses/MediaItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [Catalog]
+      operationId: deleteVideo
+      summary: Delete a video
+      description: Removes the stored file (if any) and the catalog entry.
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/audio:
+    get:
+      tags: [Catalog]
+      operationId: listAudio
+      summary: List audio (MP3 and WAV)
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200": { $ref: "#/components/responses/MediaPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/audio/{source_id}/{format}:
+    parameters:
+      - $ref: "#/components/parameters/SourceID"
+      - name: format
+        in: path
+        required: true
+        schema: { type: string, enum: [mp3, wav] }
+    get:
+      tags: [Catalog]
+      operationId: getAudio
+      summary: Get an audio entry
+      responses:
+        "200": { $ref: "#/components/responses/MediaItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [Catalog]
+      operationId: deleteAudio
+      summary: Delete an audio entry
+      description: Removes the stored file (if any) and the catalog entry.
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: ytdl_<43 base64url characters>
+      description: "`Authorization: Bearer ytdl_…`"
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    SourceURL:
+      name: url
+      in: query
+      description: Link to the media (absolute http/https URL). Takes priority over `name`.
+      schema: { type: string, maxLength: 2048, example: "https://www.youtube.com/watch?v=jNQXAC9IVRw" }
+    SourceName:
+      name: name
+      in: query
+      description: Search query, used when `url` is not given. Its first result is used.
+      schema: { type: string, maxLength: 300, example: "me at the zoo" }
+    Format:
+      name: format
+      in: query
+      required: true
+      description: Output format (case-insensitive).
+      schema: { type: string, enum: [mp4, mp3, wav] }
+    Range:
+      name: Range
+      in: header
+      description: Byte range of a stored file, e.g. `bytes=0-1023` or `bytes=-500`.
+      schema: { type: string }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: An `ETag` from a previous response; `304` if unchanged.
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Client-chosen key (1-255 printable ASCII characters) that makes retries return the same task.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    TaskID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    KeyID:
+      name: key_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    SourceID:
+      name: source_id
+      in: path
+      required: true
+      description: The yt-dlp video ID.
+      schema: { type: string, example: jNQXAC9IVRw }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    WebhookTaskID:
+      name: X-Ytdl-Task-Id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    WebhookEvent:
+      name: X-Ytdl-Event
+      in: header
+      required: true
+      schema: { type: string, enum: [task.succeeded, task.failed] }
+    WebhookContentSHA256:
+      name: X-Ytdl-Content-Sha256
+      in: header
+      required: true
+      description: Hex SHA-256 of the request body.
+      schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+    WebhookSignature:
+      name: X-Ytdl-Signature
+      in: header
+      required: true
+      description: '`t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<task_id>.<content_sha256>")>`'
+      schema: { type: string, example: "t=1700000000,v1=9ca22190c6498378a48a9032f7e5f18d414d2485a9fca75d77b173b799c48fb2" }
+
+  headers:
+    XRequestID:
+      description: Request identifier (echoes a valid incoming `X-Request-ID`); quote it when reporting problems.
+      schema: { type: string }
+    XCache:
+      description: Whether the response came from the read cache.
+      schema: { type: string, enum: [HIT, MISS] }
+    RateLimitLimit:
+      description: Requests allowed per minute for this API key.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Requests left in the current window.
+      schema: { type: integer }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+    IdempotentReplayed:
+      description: Present (`true`) when an existing task was returned.
+      schema: { type: string, enum: ["true"] }
+    ETag:
+      schema: { type: string }
+    ContentRange:
+      schema: { type: string, example: "bytes 0-1023/331052" }
+    ContentDisposition:
+      description: Download name derived from the media title.
+      schema: { type: string, example: 'attachment; filename="Me at the zoo.mp3"' }
+    AcceptRanges:
+      schema: { type: string, enum: [bytes] }
+    XYtdlSourceID:
+      description: The yt-dlp video ID of the served media.
+      schema: { type: string }
+
+  responses:
+    File:
+      description: The stored file.
+      headers:
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        X-Ytdl-Source-Id: { $ref: "#/components/headers/XYtdlSourceID" }
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        audio/mpeg: { schema: { $ref: "#/components/schemas/Binary" } }
+        audio/wav: { schema: { $ref: "#/components/schemas/Binary" } }
+        video/mp4: { schema: { $ref: "#/components/schemas/Binary" } }
+    PartialFile:
+      description: The requested byte range of the stored file.
+      headers:
+        Content-Range: { $ref: "#/components/headers/ContentRange" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        audio/mpeg: { schema: { $ref: "#/components/schemas/Binary" } }
+        audio/wav: { schema: { $ref: "#/components/schemas/Binary" } }
+        video/mp4: { schema: { $ref: "#/components/schemas/Binary" } }
+    FileHead:
+      description: Headers of the file (HEAD has no body).
+      headers:
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+    EmptyError:
+      description: The same status as the corresponding GET, without a body (HEAD).
+    NotModified:
+      description: The resource matches `If-None-Match`; no body.
+      headers:
+        ETag: { $ref: "#/components/headers/ETag" }
+    NoContent:
+      description: Done; no body.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+    WebhookSecret:
+      description: The webhook signing secret. Never cached.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [webhook_secret]
+            properties:
+              webhook_secret: { type: string, minLength: 32 }
+    IssuedAPIKey:
+      description: The issued key, including its plaintext (shown only this once).
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+    MediaPage:
+      description: A page of catalog entries.
+      headers:
+        X-Cache: { $ref: "#/components/headers/XCache" }
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/MediaPage" }
+    MediaItem:
+      description: A catalog entry.
+      headers:
+        X-Cache: { $ref: "#/components/headers/XCache" }
+        X-Request-ID: { $ref: "#/components/headers/XRequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Media" }
+    BadRequest:
+      description: Invalid parameters or body (`bad_request`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    Unauthorized:
+      description: Missing, invalid or revoked API key (`unauthorized`).
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    Forbidden:
+      description: The caller lacks the required role (`forbidden`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    NotFound:
+      description: No such resource, or not visible to the caller (`not_found`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    Conflict:
+      description: Conflicts with existing data or a safety rule (`conflict`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    TaskNotReady:
+      description: The task is still queued/running (`task_not_ready`, with `Retry-After`) or failed (`task_failed`).
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    Gone:
+      description: The task's result has expired or is no longer stored (`gone`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    RangeNotSatisfiable:
+      description: The `Range` starts beyond the end of the file.
+      headers:
+        Content-Range:
+          description: "`bytes */<size>`"
+          schema: { type: string }
+      content:
+        text/plain: { schema: { type: string } }
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    MediaRejected:
+      description: The media is too long or a live stream (`unprocessable`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    Unprocessable:
+      description: The `Idempotency-Key` was already used for a different request (`idempotency_key_reused`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    RateLimited:
+      description: Too many requests for this API key (`rate_limited`).
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+        X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+        X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    UpstreamFailed:
+      description: The media could not be retrieved, e.g. unavailable or removed (`upstream_failed`).
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+    InternalError:
+      description: Unexpected server error (`internal`); details are logged, not returned.
+      content:
+        application/json: { schema: { $ref: "#/components/schemas/Error" } }
+
+  schemas:
+    Binary:
+      type: string
+      format: binary
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - forbidden
+                - not_found
+                - conflict
+                - gone
+                - unprocessable
+                - rate_limited
+                - range_not_satisfiable
+                - upstream_failed
+                - internal
+                - idempotency_key_reused
+                - task_not_ready
+                - task_failed
+                - unavailable
+            message: { type: string }
+      example:
+        error: { code: not_found, message: not found }
+
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [database, redis]
+      properties:
+        database: { type: string, enum: [ok, unavailable] }
+        redis: { type: string, enum: [ok, unavailable] }
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, email, role, registered_at]
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [user, admin] }
+        registered_at: { type: string, format: date-time }
+
+    CreateUserRequest:
+      type: object
+      required: [username, email]
+      properties:
+        username:
+          type: string
+          pattern: "^[A-Za-z0-9._-]{3,64}$"
+        email: { type: string, format: email, maxLength: 254 }
+        role: { type: string, enum: [user, admin], default: user }
+        key_name:
+          type: string
+          default: default
+          description: Name of the first API key.
+      example:
+        username: alice
+        email: alice@example.com
+        role: user
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          pattern: "^[A-Za-z0-9._-]{3,64}$"
+        email: { type: string, format: email, maxLength: 254 }
+        role: { type: string, enum: [user, admin] }
+      example:
+        role: admin
+
+    CreatedUser:
+      type: object
+      additionalProperties: false
+      required: [user, api_key]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        api_key: { $ref: "#/components/schemas/IssuedAPIKey" }
+
+    APIKey:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, prefix, name, created_at, last_used_at, revoked_at]
+      properties:
+        id: { type: integer, format: int64 }
+        user_id: { type: integer, format: int64 }
+        prefix:
+          type: string
+          description: The first characters of the key, to tell keys apart.
+          example: ytdl_AbCdEfGh
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    IssuedAPIKey:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, prefix, name, created_at, last_used_at, revoked_at, key]
+      properties:
+        id: { type: integer, format: int64 }
+        user_id: { type: integer, format: int64 }
+        prefix: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        key:
+          type: string
+          description: The plaintext key. Store it now; it is never shown again.
+          pattern: "^ytdl_"
+
+    CreateTaskRequest:
+      type: object
+      required: [format]
+      description: "`url` or `name` is required; `url` wins when both are given."
+      properties:
+        url: { type: string, maxLength: 2048 }
+        name: { type: string, maxLength: 300 }
+        format: { type: string, enum: [mp4, mp3, wav] }
+        webhook_url:
+          type: string
+          maxLength: 2048
+          description: Public http(s) URL that receives the result (see the `taskFinished` callback).
+
+    Task:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - format
+        - source_id
+        - error
+        - webhook_url
+        - webhook_state
+        - webhook_error
+        - created_at
+        - completed_at
+        - expires_at
+        - status_url
+        - file_available
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed] }
+        format: { type: string, enum: [mp4, mp3, wav] }
+        query: { type: string, description: "The search name, if the task was created with one." }
+        url: { type: string, description: "The link, if the task was created with one." }
+        source_id: { type: string, nullable: true }
+        title: { type: string }
+        error: { type: string, nullable: true }
+        webhook_url: { type: string, nullable: true }
+        webhook_state: { type: string, enum: [none, pending, delivered, failed] }
+        webhook_error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: The file is downloadable until this moment.
+        status_url: { type: string }
+        file_url:
+          type: string
+          description: Present once the task has succeeded.
+        file_available:
+          type: boolean
+          description: True while the file can be downloaded from `file_url`.
+
+    WebhookFailedEvent:
+      type: object
+      required: [task_id, event, status, error]
+      properties:
+        task_id: { type: string, format: uuid }
+        event: { type: string, enum: [task.failed] }
+        status: { type: string, enum: [failed] }
+        error: { type: string }
+
+    HistoryItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - user_id
+        - kind
+        - format
+        - source_id
+        - status
+        - http_status
+        - from_cache
+        - task_id
+        - error
+        - duration_ms
+        - created_at
+      properties:
+        id: { type: integer, format: int64 }
+        user_id: { type: integer, format: int64 }
+        kind: { type: string, enum: [file, stream, task] }
+        query: { type: string }
+        url: { type: string }
+        format: { type: string, enum: [mp4, mp3, wav] }
+        source_id: { type: string, nullable: true }
+        title: { type: string }
+        status: { type: string, enum: [pending, ok, error] }
+        http_status: { type: integer, nullable: true }
+        from_cache:
+          type: boolean
+          description: Served from storage without downloading.
+        task_id: { type: string, format: uuid, nullable: true }
+        error: { type: string, nullable: true }
+        duration_ms: { type: integer, format: int64, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Media:
+      type: object
+      additionalProperties: false
+      required:
+        - source_id
+        - format
+        - url
+        - title
+        - duration_seconds
+        - stored
+        - storage_key
+        - last_uploaded_at
+        - last_requested_at
+        - created_at
+      properties:
+        source_id: { type: string }
+        format: { type: string, enum: [mp4, mp3, wav] }
+        url: { type: string }
+        title: { type: string }
+        duration_seconds: { type: integer, nullable: true }
+        stored:
+          type: boolean
+          description: Whether the file is currently in storage.
+        storage_key: { type: string, nullable: true }
+        last_uploaded_at: { type: string, format: date-time }
+        last_requested_at:
+          type: string
+          format: date-time
+          description: Files not requested for the idle period are deleted.
+        created_at: { type: string, format: date-time }
+
+    HistoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/HistoryItem" }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, format: int64, minimum: 0 }
+
+    UserPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/User" }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, format: int64, minimum: 0 }
+
+    MediaPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Media" }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, format: int64, minimum: 0 }

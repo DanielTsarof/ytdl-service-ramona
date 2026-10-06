@@ -69,6 +69,12 @@ The layers, top to bottom: `cmd/ytdl-service` (wiring and shutdown) → `interna
   - Key rules are in `storage.ValidateKey`.
 
 ### HTTP API (`internal/api`)
+- **Contract**: `internal/api/openapi.yaml` (OpenAPI 3.0.3, hand-written, embedded) is the source of truth for the HTTP API. It is served at `/openapi.yaml` and `/openapi.json`, with Swagger UI at `/docs`; all three are public. **Any route, parameter, status code or DTO change must update the spec in the same change.** Tests enforce this:
+  - `TestRouteParity` compares the Gin routes with the spec's operations.
+  - `TestSpecIsValid` checks the spec with kin-openapi.
+  - `env.do` in `api_test.go` validates every integration-test response against the spec. Response schemas use `additionalProperties: false`, so a new DTO field fails until it is documented.
+  - In YAML flow mappings (`{ … }`), quote any description that contains a comma.
+- **`/docs`**: loads `swagger-ui-dist` from jsDelivr at a pinned version with SRI hashes, under a nonce-based CSP. To upgrade it, change `swaggerUIVersion` and recompute both hashes: `curl -sL <file> | openssl dgst -sha384 -binary | openssl base64 -A`.
 - **Routes** are all in `server.go`.
   - Auth: `Authorization: Bearer ytdl_…` or `X-API-Key`.
   - Everything under the `admin` group requires the admin role. That covers **all** data-modifying CRUD and anything the caller doesn't own.
