@@ -375,6 +375,73 @@ func AllUserRoleValues() []UserRole {
 	}
 }
 
+type VideoQuality string
+
+const (
+	VideoQualityBest VideoQuality = "best"
+	VideoQuality1080 VideoQuality = "1080"
+	VideoQuality720  VideoQuality = "720"
+	VideoQuality480  VideoQuality = "480"
+	VideoQuality360  VideoQuality = "360"
+)
+
+func (e *VideoQuality) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = VideoQuality(s)
+	case string:
+		*e = VideoQuality(s)
+	default:
+		return fmt.Errorf("unsupported scan type for VideoQuality: %T", src)
+	}
+	return nil
+}
+
+type NullVideoQuality struct {
+	VideoQuality VideoQuality
+	Valid        bool // Valid is true if VideoQuality is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullVideoQuality) Scan(value interface{}) error {
+	if value == nil {
+		ns.VideoQuality, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.VideoQuality.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullVideoQuality) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.VideoQuality), nil
+}
+
+func (e VideoQuality) Valid() bool {
+	switch e {
+	case VideoQualityBest,
+		VideoQuality1080,
+		VideoQuality720,
+		VideoQuality480,
+		VideoQuality360:
+		return true
+	}
+	return false
+}
+
+func AllVideoQualityValues() []VideoQuality {
+	return []VideoQuality{
+		VideoQualityBest,
+		VideoQuality1080,
+		VideoQuality720,
+		VideoQuality480,
+		VideoQuality360,
+	}
+}
+
 type WebhookState string
 
 const (
@@ -508,6 +575,7 @@ type Task struct {
 	StartedAt       *time.Time
 	CompletedAt     *time.Time
 	ExpiresAt       *time.Time
+	Quality         VideoQuality
 }
 
 type User struct {
@@ -529,4 +597,5 @@ type Video struct {
 	LastUploadedAt  time.Time
 	CreatedAt       time.Time
 	LastRequestedAt time.Time
+	Quality         VideoQuality
 }

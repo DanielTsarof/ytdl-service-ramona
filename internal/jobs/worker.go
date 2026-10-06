@@ -156,7 +156,7 @@ func (r *Runner) runTask(ctx context.Context, l *slog.Logger, task dbgen.Task) {
 		}
 	}()
 
-	req := app.Request{URL: task.SourceUrl, Name: task.Query, Format: media.Format(task.Format)}
+	req := app.Request{URL: task.SourceUrl, Name: task.Query, Format: media.Format(task.Format), Quality: media.Quality(task.Quality)}
 	res, err := r.app.Get(runCtx, req)
 
 	// Shutting down: leave the task "running"; once the lease lapses another

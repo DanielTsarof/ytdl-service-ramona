@@ -29,6 +29,7 @@ type createTaskBody struct {
 	URL        string `json:"url"`
 	Name       string `json:"name"`
 	Format     string `json:"format"`
+	Quality    string `json:"quality"`
 	WebhookURL string `json:"webhook_url"`
 }
 
@@ -36,7 +37,7 @@ type createTaskBody struct {
 // Idempotency-Key reused for a different request, and without a key it is
 // the implicit idempotency key.
 func requestHash(req app.Request, webhook string) []byte {
-	sum := sha256.Sum256([]byte(strings.Join([]string{req.URL, req.Name, string(req.Format), webhook}, "\x00")))
+	sum := sha256.Sum256([]byte(strings.Join([]string{req.URL, req.Name, string(req.Format), string(req.Quality), webhook}, "\x00")))
 	return sum[:]
 }
 
@@ -58,7 +59,7 @@ func (s *Server) createTask(c *gin.Context) {
 		s.fail(c, fmt.Errorf("%w: invalid JSON body: %v", errBadParam, err))
 		return
 	}
-	req, err := app.ParseRequest(body.URL, body.Name, body.Format)
+	req, err := app.ParseRequest(body.URL, body.Name, body.Format, body.Quality)
 	if err != nil {
 		s.fail(c, err)
 		return
@@ -106,7 +107,8 @@ func (s *Server) createTask(c *gin.Context) {
 	keyID := p.KeyID
 	task, err := s.db.CreateTask(ctx, dbgen.CreateTaskParams{
 		UserID: p.User.ID, ApiKeyID: &keyID, IdempotencyKey: idemKey, RequestHash: hash,
-		Query: req.Name, SourceUrl: req.URL, Format: dbgen.MediaFormat(req.Format), WebhookUrl: webhook,
+		Query: req.Name, SourceUrl: req.URL, Format: dbgen.MediaFormat(req.Format),
+		Quality: app.VideoQuality(req.Quality), WebhookUrl: webhook,
 	})
 	if db.IsNotFound(err) && idemKey != nil {
 		// Lost a race with a concurrent request using the same key.

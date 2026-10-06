@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,9 +28,12 @@ const (
 	// audioSelector prefers an audio-only stream and falls back to a muxed one
 	// (ffmpeg drops the video).
 	audioSelector = "bestaudio/best"
-	// videoSelector prefers MP4-native streams (H.264 + AAC) so muxing into MP4
-	// is a copy, not a re-encode, and falls back to whatever is best.
-	videoSelector = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+	// videoSelector prefers H.264 (avc1) + AAC, which every player decodes,
+	// so storing it is a copy, not a re-encode. Filtering on ext=mp4 alone is
+	// not enough: YouTube's best mp4 stream is often AV1, which many players
+	// (GStreamer-based ones in particular) cannot decode. The fallbacks are
+	// re-encoded to H.264 before storing (media.storeArgs).
+	videoSelector = "bv*[vcodec^=avc1]+ba[ext=m4a]/b[vcodec^=avc1]/bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 )
 
 func (k Kind) selector() string {
@@ -38,6 +42,21 @@ func (k Kind) selector() string {
 	}
 	return audioSelector
 }
+
+// selectFormat applies the stream selection for kind to cmd. A positive
+// maxRes (video only) adds "-S res:<maxRes>": yt-dlp's res is the smaller
+// side of the frame, and the sort prefers the largest resolution at or below
+// it, else the smallest above, within each selector alternative. So the
+// H.264 preference is kept and a missing exact height never fails.
+func selectFormat(cmd *ytdlp.Command, kind Kind, maxRes int) *ytdlp.Command {
+	cmd = cmd.Format(kind.selector())
+	if kind == Video && maxRes > 0 {
+		cmd = cmd.FormatSort(formatSort(maxRes))
+	}
+	return cmd
+}
+
+func formatSort(maxRes int) string { return "res:" + strconv.Itoa(maxRes) }
 
 // Client runs yt-dlp. The zero value is not usable; build it with New.
 type Client struct {
@@ -83,9 +102,10 @@ type Info struct {
 }
 
 // Resolve returns info for a URL or plain-text search query. Non-URL queries
-// are prefixed with "ytsearch1:". Transient network failures (TLS resets
-// under throttling) are retried once on top of yt-dlp's own --retries.
-func (c *Client) Resolve(ctx context.Context, query string, kind Kind) (Info, error) {
+// are prefixed with "ytsearch1:". maxRes caps video resolution (see
+// selectFormat; 0 = best). Transient network failures (TLS resets under
+// throttling) are retried once on top of yt-dlp's own --retries.
+func (c *Client) Resolve(ctx context.Context, query string, kind Kind, maxRes int) (Info, error) {
 	input := query
 	if !isURL(query) {
 		input = "ytsearch1:" + query
@@ -94,7 +114,7 @@ func (c *Client) Resolve(ctx context.Context, query string, kind Kind) (Info, er
 	start := time.Now()
 	const attempts = 2
 	for i := 1; ; i++ {
-		info, err := c.resolveOnce(ctx, input, kind)
+		info, err := c.resolveOnce(ctx, input, kind, maxRes)
 		if err == nil {
 			c.log.Debug("yt-dlp resolved",
 				slog.String("id", info.ID),
@@ -115,9 +135,8 @@ func (c *Client) Resolve(ctx context.Context, query string, kind Kind) (Info, er
 	}
 }
 
-func (c *Client) resolveOnce(ctx context.Context, input string, kind Kind) (Info, error) {
-	result, err := c.newCommand().
-		Format(kind.selector()).
+func (c *Client) resolveOnce(ctx context.Context, input string, kind Kind, maxRes int) (Info, error) {
+	result, err := selectFormat(c.newCommand(), kind, maxRes).
 		DumpJSON().
 		Run(ctx, input)
 	if err != nil {
@@ -194,6 +213,8 @@ type Target struct {
 	AudioFormat string
 	// MergeFormat, for Kind == Video, is the yt-dlp --merge-output-format ("mp4").
 	MergeFormat string
+	// MaxRes, for Kind == Video, caps the resolution (see selectFormat; 0 = best).
+	MaxRes int
 }
 
 // Download fetches url (use Info.WebpageURL from Resolve) into dir, which
@@ -201,8 +222,7 @@ type Target struct {
 // yt-dlp handles throttling and resumption better than ffmpeg reading the raw
 // stream URL, and runs ffmpeg itself for extraction and merging.
 func (c *Client) Download(ctx context.Context, url string, t Target, dir string) (string, error) {
-	cmd := c.newCommand().
-		Format(t.Kind.selector()).
+	cmd := selectFormat(c.newCommand(), t.Kind, t.MaxRes).
 		Paths(dir).
 		Output("%(id)s.%(ext)s").
 		NoProgress()

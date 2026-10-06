@@ -20,8 +20,8 @@ import (
 // Media is the subset of *media.Service the app needs; tests substitute a
 // fake so no yt-dlp or network is involved.
 type Media interface {
-	Resolve(ctx context.Context, query string, f media.Format) (media.Source, error)
-	Lookup(ctx context.Context, id string, f media.Format) (media.Source, bool, error)
+	Resolve(ctx context.Context, query string, f media.Format, q media.Quality) (media.Source, error)
+	Lookup(ctx context.Context, id string, f media.Format, q media.Quality) (media.Source, bool, error)
 	Fetch(ctx context.Context, src media.Source) (media.Fetched, error)
 	Stream(ctx context.Context, src media.Source, w io.Writer) error
 }
@@ -53,7 +53,7 @@ func kindName(f media.Format) string {
 // which also enforces the duration and live-stream limits.
 func (a *App) Locate(ctx context.Context, req Request) (media.Source, error) {
 	if id := a.knownID(ctx, req); id != "" {
-		src, ok, err := a.Media.Lookup(ctx, id, req.Format)
+		src, ok, err := a.Media.Lookup(ctx, id, req.Format, req.Quality)
 		if err != nil {
 			return media.Source{}, err
 		}
@@ -61,7 +61,7 @@ func (a *App) Locate(ctx context.Context, req Request) (media.Source, error) {
 			return src, nil
 		}
 	}
-	src, err := a.Media.Resolve(ctx, req.Query(), req.Format)
+	src, err := a.Media.Resolve(ctx, req.Query(), req.Format, req.Quality)
 	if err != nil {
 		return media.Source{}, err
 	}
@@ -128,7 +128,8 @@ func (a *App) Get(ctx context.Context, req Request) (Result, error) {
 // was served fine.
 func (a *App) Record(ctx context.Context, src media.Source, downloaded bool) {
 	ctx = context.WithoutCancel(ctx)
-	l := a.log.With(slog.String("source_id", src.Info.ID), slog.String("format", string(src.Format)))
+	l := a.log.With(slog.String("source_id", src.Info.ID), slog.String("format", string(src.Format)),
+		slog.String("quality", string(src.Quality)))
 
 	if !downloaded {
 		n, err := a.touch(ctx, src)
@@ -152,7 +153,9 @@ func (a *App) Record(ctx context.Context, src media.Source, downloaded bool) {
 
 func (a *App) touch(ctx context.Context, src media.Source) (int64, error) {
 	if src.Format == media.MP4 {
-		return a.DB.TouchVideoRequested(ctx, src.Info.ID)
+		return a.DB.TouchVideoRequested(ctx, dbgen.TouchVideoRequestedParams{
+			SourceID: src.Info.ID, Quality: VideoQuality(src.Quality),
+		})
 	}
 	return a.DB.TouchAudioRequested(ctx, dbgen.TouchAudioRequestedParams{
 		SourceID: src.Info.ID, Format: dbgen.AudioFormat(src.Format),
@@ -172,7 +175,7 @@ func (a *App) upsert(ctx context.Context, src media.Source) error {
 	}
 	if src.Format == media.MP4 {
 		_, err := a.DB.UpsertVideo(ctx, dbgen.UpsertVideoParams{
-			SourceID: src.Info.ID, Url: link, Title: src.Info.Title, DurationSeconds: dur, StorageKey: &key,
+			SourceID: src.Info.ID, Quality: VideoQuality(src.Quality), Url: link, Title: src.Info.Title, DurationSeconds: dur, StorageKey: &key,
 		})
 		return err
 	}
@@ -181,6 +184,14 @@ func (a *App) upsert(ctx context.Context, src media.Source) error {
 		Title: src.Info.Title, DurationSeconds: dur, StorageKey: &key,
 	})
 	return err
+}
+
+// VideoQuality converts q to its database enum; the zero value is best.
+func VideoQuality(q media.Quality) dbgen.VideoQuality {
+	if q == "" {
+		return dbgen.VideoQualityBest
+	}
+	return dbgen.VideoQuality(q)
 }
 
 // Open reads a stored object (optionally a byte range).

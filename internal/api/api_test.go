@@ -51,10 +51,11 @@ var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 type fakeMedia struct {
 	store storage.Storage
 
-	mu       sync.Mutex
-	resolves int
-	fetches  map[string]int
-	queries  []string
+	mu        sync.Mutex
+	resolves  int
+	fetches   map[string]int
+	queries   []string
+	qualities []media.Quality // quality of each Resolve
 }
 
 func newFakeMedia(store storage.Storage) *fakeMedia {
@@ -77,19 +78,21 @@ func liveBytes(id string, f media.Format) []byte {
 	return []byte("LIVE:" + id + ":" + string(f))
 }
 
-func (m *fakeMedia) Resolve(ctx context.Context, query string, f media.Format) (media.Source, error) {
+func (m *fakeMedia) Resolve(ctx context.Context, query string, f media.Format, q media.Quality) (media.Source, error) {
 	m.mu.Lock()
 	m.resolves++
 	m.queries = append(m.queries, query)
+	m.qualities = append(m.qualities, q)
 	m.mu.Unlock()
 	if strings.Contains(query, "unavailable") {
 		return media.Source{}, fmt.Errorf("yt-dlp: video unavailable")
 	}
 	id := fakeID(query)
 	src := media.Source{
-		Info:   ytdl.Info{ID: id, Title: "Title " + id, WebpageURL: "https://www.youtube.com/watch?v=" + id, Duration: 42},
-		Format: f,
-		Key:    media.Key(id, f),
+		Info:    ytdl.Info{ID: id, Title: "Title " + id, WebpageURL: "https://www.youtube.com/watch?v=" + id, Duration: 42},
+		Format:  f,
+		Quality: q,
+		Key:     media.Key(id, f, q),
 	}
 	if obj, err := m.store.Stat(ctx, src.Key); err == nil {
 		src.Stored = &obj
@@ -97,14 +100,14 @@ func (m *fakeMedia) Resolve(ctx context.Context, query string, f media.Format) (
 	return src, nil
 }
 
-func (m *fakeMedia) Lookup(ctx context.Context, id string, f media.Format) (media.Source, bool, error) {
-	obj, err := m.store.Stat(ctx, media.Key(id, f))
+func (m *fakeMedia) Lookup(ctx context.Context, id string, f media.Format, q media.Quality) (media.Source, bool, error) {
+	obj, err := m.store.Stat(ctx, media.Key(id, f, q))
 	if err != nil {
 		return media.Source{}, false, nil
 	}
 	return media.Source{
 		Info:   ytdl.Info{ID: id, Title: obj.Meta["title"], WebpageURL: obj.Meta["source-url"]},
-		Format: f, Key: obj.Key, Stored: &obj,
+		Format: f, Quality: q, Key: obj.Key, Stored: &obj,
 	}, true, nil
 }
 
@@ -134,6 +137,12 @@ func (m *fakeMedia) resolvedQueries() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.queries...)
+}
+
+func (m *fakeMedia) resolvedQualities() []media.Quality {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]media.Quality(nil), m.qualities...)
 }
 
 func (m *fakeMedia) counts(key string) (resolves, fetches int) {
@@ -324,7 +333,7 @@ func TestAuthAndRoles(t *testing.T) {
 
 func TestFileIsNotRefetched(t *testing.T) {
 	e := newEnv(t, envOpts{})
-	key := media.Key("dQw4w9WgXcQ", media.MP3)
+	key := media.Key("dQw4w9WgXcQ", media.MP3, media.QualityBest)
 
 	w := e.do("GET", filesPath(ytURL, "", "mp3"), e.user, "")
 	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), fileBytes("dQw4w9WgXcQ", media.MP3)) {
@@ -387,7 +396,7 @@ func TestURLTakesPriorityOverName(t *testing.T) {
 	if w := e.do("GET", filesPath("https://vimeo.com/12345", "", "wav"), e.user, ""); w.Code != 200 {
 		t.Fatalf("repeat: %d", w.Code)
 	}
-	if _, f := e.fake.counts(media.Key(fakeID("https://vimeo.com/12345"), media.WAV)); f != 1 {
+	if _, f := e.fake.counts(media.Key(fakeID("https://vimeo.com/12345"), media.WAV, media.QualityBest)); f != 1 {
 		t.Fatalf("fetched %d times", f)
 	}
 }
@@ -459,7 +468,7 @@ func TestStream(t *testing.T) {
 	if w.Header().Get("Content-Type") != "audio/mpeg" || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("live headers: %v", w.Header())
 	}
-	if _, f := e.fake.counts(media.Key("dQw4w9WgXcQ", media.MP3)); f != 0 {
+	if _, f := e.fake.counts(media.Key("dQw4w9WgXcQ", media.MP3, media.QualityBest)); f != 0 {
 		t.Fatal("live stream stored the file")
 	}
 
@@ -585,6 +594,102 @@ func TestTaskByName(t *testing.T) {
 	items := h["items"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["query"] != name || items[0].(map[string]any)["status"] != "ok" {
 		t.Fatalf("history for name task: %v", items)
+	}
+}
+
+func TestQuality(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	const id = "dQw4w9WgXcQ"
+	get := func(q string) *httptest.ResponseRecorder {
+		return e.do("GET", "/v1/files?url="+ytURL+"&format=mp4"+q, e.user, "")
+	}
+
+	// 720 and best are separate stored files.
+	if w := get("&quality=720"); w.Code != 200 {
+		t.Fatalf("720: %d %s", w.Code, w.Body)
+	}
+	if w := get(""); w.Code != 200 {
+		t.Fatalf("best: %d %s", w.Code, w.Body)
+	}
+	if got := e.fake.resolvedQualities(); len(got) != 2 || got[0] != media.Quality720 || got[1] != media.QualityBest {
+		t.Fatalf("resolved qualities = %v, want [720 best]", got)
+	}
+	k720, kBest := media.Key(id, media.MP4, media.Quality720), media.Key(id, media.MP4, media.QualityBest)
+	if k720 == kBest {
+		t.Fatal("720 and best share a storage key")
+	}
+	for _, k := range []string{k720, kBest} {
+		if _, err := e.store.Stat(context.Background(), k); err != nil {
+			t.Fatalf("%s not stored: %v", k, err)
+		}
+	}
+
+	// A repeat 720 request is served from storage without yt-dlp.
+	before, _ := e.fake.counts(k720)
+	if w := get("&quality=720"); w.Code != 200 {
+		t.Fatalf("720 again: %d", w.Code)
+	}
+	if after, fetches := e.fake.counts(k720); after != before || fetches != 1 {
+		t.Fatalf("720 repeat: resolves %d -> %d, fetches %d", before, after, fetches)
+	}
+
+	if w := get("&quality=999"); w.Code != 400 {
+		t.Fatalf("invalid quality: %d", w.Code)
+	}
+
+	// Audio ignores quality: one stored file either way.
+	e.do("GET", "/v1/files?url="+ytURL+"&format=mp3&quality=720", e.user, "")
+	e.do("GET", "/v1/files?url="+ytURL+"&format=mp3", e.user, "")
+	if _, f := e.fake.counts(media.Key(id, media.MP3, media.QualityBest)); f != 1 {
+		t.Fatalf("mp3 fetched %d times, want 1", f)
+	}
+
+	// Tasks carry the quality; 480 differs from best, so it is a new task.
+	created := e.json(e.do("POST", "/v1/tasks", e.user, `{"url":"`+ytURL+`","format":"mp4","quality":"480"}`), 202)
+	if created["quality"] != "480" {
+		t.Fatalf("task quality: %v", created["quality"])
+	}
+	done := e.waitTask(e.user, created["id"].(string), finished)
+	if done["status"] != "succeeded" {
+		t.Fatalf("480 task: %v", done)
+	}
+	if _, err := e.store.Stat(context.Background(), media.Key(id, media.MP4, media.Quality480)); err != nil {
+		t.Fatalf("480 not stored: %v", err)
+	}
+	if mp3 := e.json(e.do("POST", "/v1/tasks", e.user, `{"url":"`+ytURL+`","format":"mp3","quality":"720"}`), 202); mp3["quality"] != "best" {
+		t.Fatalf("mp3 task quality: %v", mp3["quality"])
+	}
+
+	// Catalog: one row per quality; GET defaults to best.
+	list := e.json(e.do("GET", "/v1/videos", e.admin, ""), 200)
+	if n := len(list["items"].([]any)); n != 3 {
+		t.Fatalf("catalog has %d video rows, want 3 (best, 720, 480)", n)
+	}
+	if v := e.json(e.do("GET", "/v1/videos/"+id, e.admin, ""), 200); v["quality"] != "best" {
+		t.Fatalf("default catalog quality: %v", v["quality"])
+	}
+	if v := e.json(e.do("GET", "/v1/videos/"+id+"?quality=720", e.admin, ""), 200); v["quality"] != "720" {
+		t.Fatalf("720 catalog row: %v", v)
+	}
+
+	// Delete one quality, then the rest.
+	if w := e.do("DELETE", "/v1/videos/"+id+"?quality=720", e.admin, ""); w.Code != 204 {
+		t.Fatalf("delete 720: %d", w.Code)
+	}
+	if _, err := e.store.Stat(context.Background(), k720); err == nil {
+		t.Fatal("720 file still stored")
+	}
+	if w := e.do("GET", "/v1/videos/"+id+"?quality=720", e.admin, ""); w.Code != 404 {
+		t.Fatalf("720 after delete: %d", w.Code)
+	}
+	if w := e.do("DELETE", "/v1/videos/"+id, e.admin, ""); w.Code != 204 {
+		t.Fatalf("delete all: %d", w.Code)
+	}
+	if _, err := e.store.Stat(context.Background(), kBest); err == nil {
+		t.Fatal("best file still stored")
+	}
+	if w := e.do("DELETE", "/v1/videos/"+id, e.admin, ""); w.Code != 404 {
+		t.Fatalf("delete with no rows left: %d", w.Code)
 	}
 }
 
@@ -859,7 +964,7 @@ func TestCatalogDelete(t *testing.T) {
 	if w := e.do("DELETE", "/v1/videos/dQw4w9WgXcQ", e.admin, ""); w.Code != 204 {
 		t.Fatalf("admin delete: %d", w.Code)
 	}
-	if _, err := e.store.Stat(context.Background(), media.Key("dQw4w9WgXcQ", media.MP4)); err == nil {
+	if _, err := e.store.Stat(context.Background(), media.Key("dQw4w9WgXcQ", media.MP4, media.QualityBest)); err == nil {
 		t.Fatal("stored file survived catalog delete")
 	}
 	if w := e.do("GET", "/v1/videos/dQw4w9WgXcQ", e.admin, ""); w.Code != 404 {
@@ -890,7 +995,7 @@ func TestCleanupEvictsIdleFiles(t *testing.T) {
 	}
 
 	stored := func(id string) bool {
-		_, err := e.store.Stat(ctx, media.Key(id, media.MP3))
+		_, err := e.store.Stat(ctx, media.Key(id, media.MP3, media.QualityBest))
 		return err == nil
 	}
 	if stored("aaaaaaaaaaa") || !stored("bbbbbbbbbbb") || !stored("ccccccccccc") {
@@ -902,11 +1007,11 @@ func TestCleanupEvictsIdleFiles(t *testing.T) {
 	}
 
 	// Requesting an evicted file downloads it again.
-	_, before := e.fake.counts(media.Key("aaaaaaaaaaa", media.MP3))
+	_, before := e.fake.counts(media.Key("aaaaaaaaaaa", media.MP3, media.QualityBest))
 	if w := e.do("GET", filesPath(idle, "", "mp3"), e.user, ""); w.Code != 200 {
 		t.Fatalf("re-request: %d", w.Code)
 	}
-	if _, after := e.fake.counts(media.Key("aaaaaaaaaaa", media.MP3)); after != before+1 {
+	if _, after := e.fake.counts(media.Key("aaaaaaaaaaa", media.MP3, media.QualityBest)); after != before+1 {
 		t.Fatalf("evicted file not re-fetched: %d -> %d", before, after)
 	}
 }

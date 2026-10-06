@@ -1,9 +1,9 @@
 -- name: UpsertVideo :one
 -- Records an upload to storage; a repeat upload of the same video refreshes
 -- the row and its last_uploaded_at.
-INSERT INTO videos (source_id, url, title, duration_seconds, storage_key)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (source_id) DO UPDATE
+INSERT INTO videos (source_id, quality, url, title, duration_seconds, storage_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (source_id, quality) DO UPDATE
 SET url              = EXCLUDED.url,
     title            = EXCLUDED.title,
     duration_seconds = EXCLUDED.duration_seconds,
@@ -12,8 +12,12 @@ SET url              = EXCLUDED.url,
     last_requested_at = now()
 RETURNING *;
 
--- name: GetVideoBySourceID :one
-SELECT * FROM videos WHERE source_id = $1;
+-- name: GetVideo :one
+SELECT * FROM videos WHERE source_id = $1 AND quality = $2;
+
+-- name: ListVideosBySourceID :many
+-- Every stored quality of one video.
+SELECT * FROM videos WHERE source_id = $1 ORDER BY quality;
 
 -- name: ListVideos :many
 SELECT * FROM videos
@@ -22,14 +26,18 @@ LIMIT $1 OFFSET $2;
 
 -- name: ClearVideoStorageKey :execrows
 -- Marks the file as no longer stored (e.g. evicted); the row is kept.
-UPDATE videos SET storage_key = NULL WHERE source_id = $1;
+UPDATE videos SET storage_key = NULL WHERE source_id = $1 AND quality = $2;
 
 -- name: DeleteVideo :execrows
+DELETE FROM videos WHERE source_id = $1 AND quality = $2;
+
+-- name: DeleteVideosBySourceID :execrows
+-- Removes every quality of one video.
 DELETE FROM videos WHERE source_id = $1;
 
 -- name: TouchVideoRequested :execrows
 -- Called whenever a stored file is served; keeps it from idle eviction.
-UPDATE videos SET last_requested_at = now() WHERE source_id = $1;
+UPDATE videos SET last_requested_at = now() WHERE source_id = $1 AND quality = $2;
 
 -- name: GetVideoByURL :one
 SELECT * FROM videos WHERE url = $1 ORDER BY last_requested_at DESC LIMIT 1;

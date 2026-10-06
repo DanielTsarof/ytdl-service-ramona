@@ -21,7 +21,7 @@ type Querier interface {
 	// Marks the file as no longer stored (e.g. evicted); the row is kept.
 	ClearAudioStorageKey(ctx context.Context, arg ClearAudioStorageKeyParams) (int64, error)
 	// Marks the file as no longer stored (e.g. evicted); the row is kept.
-	ClearVideoStorageKey(ctx context.Context, sourceID string) (int64, error)
+	ClearVideoStorageKey(ctx context.Context, arg ClearVideoStorageKeyParams) (int64, error)
 	CompleteTask(ctx context.Context, arg CompleteTaskParams) (Task, error)
 	CountAudio(ctx context.Context) (int64, error)
 	CountHistory(ctx context.Context, arg CountHistoryParams) (int64, error)
@@ -35,7 +35,9 @@ type Querier interface {
 	DeleteAudio(ctx context.Context, arg DeleteAudioParams) (int64, error)
 	// Cascades to the user's API keys.
 	DeleteUser(ctx context.Context, id int64) (int64, error)
-	DeleteVideo(ctx context.Context, sourceID string) (int64, error)
+	DeleteVideo(ctx context.Context, arg DeleteVideoParams) (int64, error)
+	// Removes every quality of one video.
+	DeleteVideosBySourceID(ctx context.Context, sourceID string) (int64, error)
 	ExtendTaskLease(ctx context.Context, arg ExtendTaskLeaseParams) (int64, error)
 	// Tasks whose worker died on the last allowed attempt would otherwise stay
 	// "running" forever.
@@ -54,7 +56,7 @@ type Querier interface {
 	GetUserByAPIKeyHash(ctx context.Context, keyHash []byte) (GetUserByAPIKeyHashRow, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
-	GetVideoBySourceID(ctx context.Context, sourceID string) (Video, error)
+	GetVideo(ctx context.Context, arg GetVideoParams) (Video, error)
 	GetVideoByURL(ctx context.Context, url string) (Video, error)
 	InsertHistory(ctx context.Context, arg InsertHistoryParams) (int64, error)
 	// Never returns key_hash.
@@ -71,6 +73,8 @@ type Querier interface {
 	ListIdleVideos(ctx context.Context, arg ListIdleVideosParams) ([]Video, error)
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
 	ListVideos(ctx context.Context, arg ListVideosParams) ([]Video, error)
+	// Every stored quality of one video.
+	ListVideosBySourceID(ctx context.Context, sourceID string) ([]Video, error)
 	MarkWebhookDelivered(ctx context.Context, id uuid.UUID) error
 	MarkWebhookFailed(ctx context.Context, arg MarkWebhookFailedParams) error
 	MarkWebhookRetry(ctx context.Context, arg MarkWebhookRetryParams) error
@@ -83,7 +87,7 @@ type Querier interface {
 	// Called whenever a stored file is served; keeps it from idle eviction.
 	TouchAudioRequested(ctx context.Context, arg TouchAudioRequestedParams) (int64, error)
 	// Called whenever a stored file is served; keeps it from idle eviction.
-	TouchVideoRequested(ctx context.Context, sourceID string) (int64, error)
+	TouchVideoRequested(ctx context.Context, arg TouchVideoRequestedParams) (int64, error)
 	// Partial update: NULL arguments keep the current value.
 	UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error)
 	UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) (User, error)

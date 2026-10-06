@@ -44,7 +44,7 @@ func TestIntegrationFetchAllFormats(t *testing.T) {
 	want := map[Format]string{MP4: "video", MP3: "audio", WAV: "audio"}
 	for _, f := range Formats {
 		t.Run(string(f), func(t *testing.T) {
-			src, err := svc.Resolve(ctx, integrationURL(), f)
+			src, err := svc.Resolve(ctx, integrationURL(), f, QualityBest)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,7 +76,7 @@ func TestIntegrationFetchAllFormats(t *testing.T) {
 				t.Fatalf("%s output has no %s stream", f, want[f])
 			}
 
-			again, err := svc.Resolve(ctx, integrationURL(), f)
+			again, err := svc.Resolve(ctx, integrationURL(), f, QualityBest)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,7 +97,7 @@ func TestIntegrationStreamCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := svc.Resolve(context.Background(), integrationURL(), MP3)
+	src, err := svc.Resolve(context.Background(), integrationURL(), MP3, QualityBest)
 	if err != nil {
 		t.Fatal(err)
 	}

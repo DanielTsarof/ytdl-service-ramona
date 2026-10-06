@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -64,16 +65,19 @@ func New(yt *ytdl.Client, store storage.Storage, opts Options, logger *slog.Logg
 type Source struct {
 	Info   ytdl.Info
 	Format Format
-	Key    string
+	// Quality is always QualityBest for audio formats (see ParseQuality).
+	Quality Quality
+	Key     string
 	// Stored is set when the file is already in storage.
 	Stored *storage.ObjectInfo
 }
 
 // Resolve looks up query and checks whether the requested format is already
 // stored. Cache keys use the video ID, so a URL and a search query that land
-// on the same video share one stored file.
-func (s *Service) Resolve(ctx context.Context, query string, f Format) (Source, error) {
-	info, err := s.yt.Resolve(ctx, query, f.Kind())
+// on the same video share one stored file. Each video quality is its own file.
+func (s *Service) Resolve(ctx context.Context, query string, f Format, q Quality) (Source, error) {
+	q = q.normal()
+	info, err := s.yt.Resolve(ctx, query, f.Kind(), q.MaxRes())
 	if err != nil {
 		return Source{}, err
 	}
@@ -84,7 +88,7 @@ func (s *Service) Resolve(ctx context.Context, query string, f Format) (Source, 
 		return Source{}, fmt.Errorf("%w: %ds > %s", ErrTooLong, info.Duration, max)
 	}
 
-	src := Source{Info: info, Format: f, Key: Key(info.ID, f)}
+	src := Source{Info: info, Format: f, Quality: q, Key: Key(info.ID, f, q)}
 	switch obj, err := s.store.Stat(ctx, src.Key); {
 	case err == nil:
 		src.Stored = &obj
@@ -97,8 +101,9 @@ func (s *Service) Resolve(ctx context.Context, query string, f Format) (Source, 
 // Lookup builds a Source for a known video ID without running yt-dlp. ok is
 // false when the file is not in storage (the caller then falls back to
 // Resolve, which also refreshes title/duration and enforces the limits).
-func (s *Service) Lookup(ctx context.Context, id string, f Format) (src Source, ok bool, err error) {
-	key := Key(id, f)
+func (s *Service) Lookup(ctx context.Context, id string, f Format, q Quality) (src Source, ok bool, err error) {
+	q = q.normal()
+	key := Key(id, f, q)
 	obj, err := s.store.Stat(ctx, key)
 	if errors.Is(err, storage.ErrNotFound) {
 		return Source{}, false, nil
@@ -114,12 +119,18 @@ func (s *Service) Lookup(ctx context.Context, id string, f Format) (src Source, 
 			info.Duration = d
 		}
 	}
-	return Source{Info: info, Format: f, Key: key, Stored: &obj}, true, nil
+	return Source{Info: info, Format: f, Quality: q, Key: key, Stored: &obj}, true, nil
 }
 
-// Key is the storage key for video id in format f.
-func Key(id string, f Format) string {
-	return "media/" + safeID(id) + "/" + string(f) + "." + f.Ext()
+// Key is the storage key for video id in format f and quality q. Best keeps
+// the key used before qualities existed (media/<id>/mp4.mp4); a capped
+// quality adds a suffix (media/<id>/mp4-720.mp4).
+func Key(id string, f Format, q Quality) string {
+	name := string(f)
+	if q := q.normal(); q != QualityBest {
+		name += "-" + string(q)
+	}
+	return "media/" + safeID(id) + "/" + name + "." + f.Ext()
 }
 
 // safeID keeps IDs from any extractor usable as a single key element.
@@ -192,12 +203,18 @@ func (s *Service) download(ctx context.Context, src Source) (Fetched, error) {
 	if url == "" {
 		url = "https://www.youtube.com/watch?v=" + src.Info.ID
 	}
-	path, err := s.yt.Download(ctx, url, src.Format.target(), dir)
+	path, err := s.yt.Download(ctx, url, src.Format.target(src.Quality), dir)
 	if err != nil {
 		l.Error("download failed", slog.Duration("elapsed", time.Since(start)), slog.Any("err", err))
 		return Fetched{}, err
 	}
 	downloaded := time.Since(start)
+
+	if src.Format == MP4 {
+		if path, err = s.finalizeMP4(ctx, l, src.Info, path); err != nil {
+			return Fetched{}, err
+		}
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -222,6 +239,23 @@ func (s *Service) download(ctx context.Context, src Source) (Fetched, error) {
 		slog.Duration("download", downloaded),
 		slog.Duration("total", time.Since(start)))
 	return Fetched{Object: obj, Downloaded: true}, nil
+}
+
+// finalizeMP4 rewrites a downloaded MP4 into the stored form (see storeArgs)
+// next to it and returns the new path.
+func (s *Service) finalizeMP4(ctx context.Context, l *slog.Logger, info ytdl.Info, path string) (string, error) {
+	args, reencode := storeArgs(info)
+	out := filepath.Join(filepath.Dir(path), "final.mp4")
+	start := time.Now()
+	if err := ffmpeg.Run(ctx, l, ffmpeg.Spec{Inputs: []string{path}, OutArgs: args, Output: out}); err != nil {
+		l.Error("finalizing mp4 failed", slog.Bool("reencode", reencode), slog.Any("err", err))
+		return "", fmt.Errorf("finalize mp4: %w", err)
+	}
+	if reencode {
+		l.Info("re-encoded video to H.264", slog.String("codec", info.VideoCodec),
+			slog.Duration("elapsed", time.Since(start)))
+	}
+	return out, nil
 }
 
 // Open reads a stored object, optionally a byte range of it (for seeking
@@ -277,7 +311,7 @@ func (s *Service) Stream(ctx context.Context, src Source, w io.Writer) error {
 			continue
 		}
 		l.Warn("stream failed before first byte, re-resolving", slog.Any("err", err))
-		fresh, rerr := s.yt.Resolve(ctx, info.WebpageURL, src.Format.Kind())
+		fresh, rerr := s.yt.Resolve(ctx, info.WebpageURL, src.Format.Kind(), src.Quality.MaxRes())
 		if rerr != nil {
 			l.Warn("re-resolve failed, reusing old URLs", slog.Any("err", rerr))
 		} else {

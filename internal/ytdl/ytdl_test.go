@@ -1,8 +1,11 @@
 package ytdl
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	ytdlp "github.com/lrstanley/go-ytdlp"
@@ -87,5 +90,40 @@ func TestIsIntermediate(t *testing.T) {
 		if got := isIntermediate(name); got != want {
 			t.Errorf("isIntermediate(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+func TestSelectFormat(t *testing.T) {
+	args := func(kind Kind, maxRes int) string {
+		return strings.Join(selectFormat(ytdlp.New(), kind, maxRes).BuildCommand(context.Background()).Args[1:], " ")
+	}
+	cases := []struct {
+		name    string
+		kind    Kind
+		maxRes  int
+		want    []string
+		notWant string
+	}{
+		{"video best", Video, 0, []string{"--format " + videoSelector}, "--format-sort"},
+		{"video 720", Video, 720, []string{"--format " + videoSelector, "--format-sort res:720"}, ""},
+		// Quality never applies to audio.
+		{"audio ignores cap", Audio, 720, []string{"--format " + audioSelector}, "--format-sort"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := args(tc.kind, tc.maxRes)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("args %q missing %q", got, w)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("args %q contain %q", got, tc.notWant)
+			}
+		})
+	}
+	// The H.264 preference comes first in every quality.
+	if !slices.Contains(strings.Split(videoSelector, "/"), "bv*[vcodec^=avc1]+ba[ext=m4a]") {
+		t.Errorf("videoSelector %q lost the H.264 preference", videoSelector)
 	}
 }

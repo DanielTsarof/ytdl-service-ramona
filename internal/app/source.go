@@ -24,12 +24,18 @@ type Request struct {
 	URL    string
 	Name   string
 	Format media.Format
+	// Quality is always best for audio formats (see media.ParseQuality).
+	Quality media.Quality
 }
 
 // ParseRequest validates raw parameters. url takes priority: when it is
-// non-empty, name is ignored.
-func ParseRequest(rawURL, name, format string) (Request, error) {
+// non-empty, name is ignored. An empty quality means best.
+func ParseRequest(rawURL, name, format, quality string) (Request, error) {
 	f, err := media.ParseFormat(format)
+	if err != nil {
+		return Request{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	q, err := media.ParseQuality(quality, f)
 	if err != nil {
 		return Request{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
@@ -43,12 +49,12 @@ func ParseRequest(rawURL, name, format string) (Request, error) {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return Request{}, fmt.Errorf("%w: url must be an absolute http(s) URL", ErrInvalidRequest)
 		}
-		return Request{URL: rawURL, Format: f}, nil
+		return Request{URL: rawURL, Format: f, Quality: q}, nil
 	case name != "":
 		if len(name) > maxNameLen {
 			return Request{}, fmt.Errorf("%w: name longer than %d characters", ErrInvalidRequest, maxNameLen)
 		}
-		return Request{Name: name, Format: f}, nil
+		return Request{Name: name, Format: f, Quality: q}, nil
 	}
 	return Request{}, fmt.Errorf("%w: either url or name is required", ErrInvalidRequest)
 }

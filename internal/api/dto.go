@@ -47,8 +47,10 @@ type issuedKeyDTO struct {
 }
 
 type mediaDTO struct {
-	SourceID        string    `json:"source_id"`
-	Format          string    `json:"format"`
+	SourceID string `json:"source_id"`
+	Format   string `json:"format"`
+	// Quality is set for videos only; audio has no quality.
+	Quality         string    `json:"quality,omitempty"`
 	URL             string    `json:"url"`
 	Title           string    `json:"title"`
 	DurationSeconds *int32    `json:"duration_seconds"`
@@ -61,7 +63,7 @@ type mediaDTO struct {
 
 func toVideo(v dbgen.Video) mediaDTO {
 	return mediaDTO{
-		SourceID: v.SourceID, Format: "mp4", URL: v.Url, Title: v.Title, DurationSeconds: v.DurationSeconds,
+		SourceID: v.SourceID, Format: "mp4", Quality: string(v.Quality), URL: v.Url, Title: v.Title, DurationSeconds: v.DurationSeconds,
 		Stored: v.StorageKey != nil, StorageKey: v.StorageKey,
 		LastUploadedAt: v.LastUploadedAt, LastRequestedAt: v.LastRequestedAt, CreatedAt: v.CreatedAt,
 	}
@@ -110,6 +112,7 @@ type taskDTO struct {
 	ID            string     `json:"id"`
 	Status        string     `json:"status"`
 	Format        string     `json:"format"`
+	Quality       string     `json:"quality"`
 	Query         string     `json:"query,omitempty"`
 	URL           string     `json:"url,omitempty"`
 	SourceID      *string    `json:"source_id"`
@@ -128,7 +131,7 @@ type taskDTO struct {
 
 func toTask(t dbgen.Task, now time.Time) taskDTO {
 	d := taskDTO{
-		ID: t.ID.String(), Status: string(t.Status), Format: string(t.Format), Query: t.Query, URL: t.SourceUrl,
+		ID: t.ID.String(), Status: string(t.Status), Format: string(t.Format), Quality: string(t.Quality), Query: t.Query, URL: t.SourceUrl,
 		SourceID: t.SourceID, Title: t.Title, Error: t.Error, WebhookURL: t.WebhookUrl,
 		WebhookState: string(t.WebhookState), WebhookError: t.WebhookError,
 		CreatedAt: t.CreatedAt, CompletedAt: t.CompletedAt, ExpiresAt: t.ExpiresAt,

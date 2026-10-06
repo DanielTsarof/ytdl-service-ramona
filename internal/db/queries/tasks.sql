@@ -1,8 +1,8 @@
 -- name: CreateTask :one
 -- Returns no row when (user_id, idempotency_key) already exists; the caller
 -- then loads the existing task with GetTaskByIdempotency.
-INSERT INTO tasks (user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, webhook_url)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO tasks (user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, quality, webhook_url)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (user_id, idempotency_key) DO NOTHING
 RETURNING *;
 

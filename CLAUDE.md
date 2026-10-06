@@ -54,6 +54,10 @@ The layers, top to bottom: `cmd/ytdl-service` (wiring and shutdown) → `interna
 
 ### Retrieval (`internal/app`, `internal/media`)
 - **`app.ParseRequest`**: `url` takes priority over `name` (a search query), and `format` is one of mp4, mp3 or wav.
+- **Quality** (`media.Quality`: best, 1080, 720, 480 or 360) caps video resolution by the smaller side, via yt-dlp `-S res:N` (`ytdl.selectFormat`).
+  - Each quality is its own file: `Key` adds `-720` and so on, while `best` keeps the original key `media/<id>/mp4.mp4`.
+  - Each quality is also its own `videos` row, unique on (source_id, quality).
+  - `ParseQuality` forces `best` for mp3/wav so audio is never split. `tasks.quality` and `request_hash` include it.
 - **`app.Locate`** first looks for a cheap video ID: a YouTube URL is parsed with `app.YouTubeID`, any other URL is looked up in the catalog by `url`, and a name is looked up in the Redis resolve cache. If that ID's file is in storage (`media.Service.Lookup`), yt-dlp never runs. Otherwise it calls `media.Service.Resolve`, which enforces the duration and live-stream limits.
 - **`app.Get`** = Locate, then `Fetch`, then `Record`:
   - `Fetch` downloads only if the file isn't stored, deduped with singleflight, and reports `Downloaded`.
@@ -61,6 +65,7 @@ The layers, top to bottom: `cmd/ytdl-service` (wiring and shutdown) → `interna
 - **`media.Service`**:
   - `Resolve` runs yt-dlp `--dump-json` and returns a `Source`: stream URLs, the storage key `media/<videoID>/<fmt>.<ext>`, and `Stored`.
   - `Fetch` downloads via yt-dlp into `WorkDir`, then `Put`s the result into storage. The download is detached from the caller's context, with a 30-minute cap.
+  - A stored MP4 is always H.264 + AAC with `+faststart`, so it plays outside VLC. The yt-dlp selector prefers `avc1`, and `finalizeMP4` remuxes it with `storeArgs` or re-encodes anything else (AV1, VP9, unknown codec).
   - `Stream` runs a live ffmpeg transcode; its args are in `media/format.go`. It retries only before the first byte is written.
   - `internal/ffmpeg` logs its argv with URLs reduced to hosts, because the URLs carry signed tokens.
 - **Storage** (`internal/storage`):

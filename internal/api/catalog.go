@@ -5,8 +5,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/DanielTsarof/ytdl-service-ramona/internal/app"
 	"github.com/DanielTsarof/ytdl-service-ramona/internal/db/dbgen"
+	"github.com/DanielTsarof/ytdl-service-ramona/internal/media"
 )
 
 func (s *Server) listVideos(c *gin.Context) {
@@ -34,7 +37,12 @@ func (s *Server) listVideos(c *gin.Context) {
 }
 
 func (s *Server) getVideo(c *gin.Context) {
-	v, err := s.db.GetVideoBySourceID(c.Request.Context(), c.Param("source_id"))
+	q, err := videoQuality(c.Query("quality"))
+	if err != nil {
+		s.fail(c, err)
+		return
+	}
+	v, err := s.db.GetVideo(c.Request.Context(), dbgen.GetVideoParams{SourceID: c.Param("source_id"), Quality: q})
 	if err != nil {
 		s.fail(c, err)
 		return
@@ -42,26 +50,58 @@ func (s *Server) getVideo(c *gin.Context) {
 	c.JSON(http.StatusOK, toVideo(v))
 }
 
-// deleteVideo removes the stored file (if any) and the catalog row.
+// deleteVideo removes stored files and their catalog rows: one quality with
+// ?quality=, otherwise every quality of the video.
 func (s *Server) deleteVideo(c *gin.Context) {
 	ctx := c.Request.Context()
-	v, err := s.db.GetVideoBySourceID(ctx, c.Param("source_id"))
-	if err != nil {
-		s.fail(c, err)
-		return
+	id := c.Param("source_id")
+	var rows []dbgen.Video
+	if raw := c.Query("quality"); raw != "" {
+		q, err := videoQuality(raw)
+		if err != nil {
+			s.fail(c, err)
+			return
+		}
+		v, err := s.db.GetVideo(ctx, dbgen.GetVideoParams{SourceID: id, Quality: q})
+		if err != nil {
+			s.fail(c, err)
+			return
+		}
+		rows = []dbgen.Video{v}
+	} else {
+		var err error
+		if rows, err = s.db.ListVideosBySourceID(ctx, id); err != nil {
+			s.fail(c, err)
+			return
+		}
+		if len(rows) == 0 {
+			s.fail(c, pgx.ErrNoRows)
+			return
+		}
 	}
-	if v.StorageKey != nil {
-		if err := s.app.DeleteStored(ctx, *v.StorageKey); err != nil {
+	for _, v := range rows {
+		if v.StorageKey != nil {
+			if err := s.app.DeleteStored(ctx, *v.StorageKey); err != nil {
+				s.fail(c, err)
+				return
+			}
+		}
+		if _, err := s.db.DeleteVideo(ctx, dbgen.DeleteVideoParams{SourceID: v.SourceID, Quality: v.Quality}); err != nil {
 			s.fail(c, err)
 			return
 		}
 	}
-	if _, err := s.db.DeleteVideo(ctx, v.SourceID); err != nil {
-		s.fail(c, err)
-		return
-	}
 	s.cache.Bump(ctx, scopeMedia)
 	c.Status(http.StatusNoContent)
+}
+
+// videoQuality parses an optional ?quality= for the video catalog (empty is best).
+func videoQuality(raw string) (dbgen.VideoQuality, error) {
+	q, err := media.ParseQuality(raw, media.MP4)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errBadParam, err)
+	}
+	return app.VideoQuality(q), nil
 }
 
 func (s *Server) listAudio(c *gin.Context) {

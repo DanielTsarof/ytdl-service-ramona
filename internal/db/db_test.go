@@ -131,7 +131,7 @@ func TestVideoUpsert(t *testing.T) {
 	ctx := context.Background()
 
 	first, err := d.UpsertVideo(ctx, dbgen.UpsertVideoParams{
-		SourceID: "abc", Url: "https://youtu.be/abc", Title: "Old", DurationSeconds: ptr[int32](19),
+		SourceID: "abc", Quality: dbgen.VideoQualityBest, Url: "https://youtu.be/abc", Title: "Old", DurationSeconds: ptr[int32](19),
 		StorageKey: ptr("media/abc/mp4.mp4"),
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestVideoUpsert(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 	second, err := d.UpsertVideo(ctx, dbgen.UpsertVideoParams{
-		SourceID: "abc", Url: "https://www.youtube.com/watch?v=abc", Title: "New",
+		SourceID: "abc", Quality: dbgen.VideoQualityBest, Url: "https://www.youtube.com/watch?v=abc", Title: "New",
 		StorageKey: ptr("media/abc/mp4.mp4"),
 	})
 	if err != nil {
@@ -158,11 +158,11 @@ func TestVideoUpsert(t *testing.T) {
 		t.Errorf("row not updated: %+v", second)
 	}
 
-	n, err := d.ClearVideoStorageKey(ctx, "abc")
+	n, err := d.ClearVideoStorageKey(ctx, dbgen.ClearVideoStorageKeyParams{SourceID: "abc", Quality: dbgen.VideoQualityBest})
 	if err != nil || n != 1 {
 		t.Fatalf("clear storage key: %d, %v", n, err)
 	}
-	got, err := d.GetVideoBySourceID(ctx, "abc")
+	got, err := d.GetVideo(ctx, dbgen.GetVideoParams{SourceID: "abc", Quality: dbgen.VideoQualityBest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,11 +175,42 @@ func TestVideoUpsert(t *testing.T) {
 		t.Fatalf("list: %d rows, %v", len(list), err)
 	}
 
-	if n, err := d.DeleteVideo(ctx, "abc"); err != nil || n != 1 {
+	if n, err := d.DeleteVideo(ctx, dbgen.DeleteVideoParams{SourceID: "abc", Quality: dbgen.VideoQualityBest}); err != nil || n != 1 {
 		t.Fatalf("delete: %d, %v", n, err)
 	}
-	if _, err := d.GetVideoBySourceID(ctx, "abc"); !IsNotFound(err) {
+	if _, err := d.GetVideo(ctx, dbgen.GetVideoParams{SourceID: "abc", Quality: dbgen.VideoQualityBest}); !IsNotFound(err) {
 		t.Fatalf("get after delete: %v, want not found", err)
+	}
+}
+
+func TestVideoQualitiesAreSeparateRows(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+
+	best, err := d.UpsertVideo(ctx, dbgen.UpsertVideoParams{
+		SourceID: "abc", Quality: dbgen.VideoQualityBest, Url: "https://youtu.be/abc", StorageKey: ptr("media/abc/mp4.mp4"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q720, err := d.UpsertVideo(ctx, dbgen.UpsertVideoParams{
+		SourceID: "abc", Quality: dbgen.VideoQuality720, Url: "https://youtu.be/abc", StorageKey: ptr("media/abc/mp4-720.mp4"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if best.ID == q720.ID {
+		t.Fatal("720 upsert overwrote the best row")
+	}
+	rows, err := d.ListVideosBySourceID(ctx, "abc")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("list by source: %d rows, %v", len(rows), err)
+	}
+	if n, err := d.TouchVideoRequested(ctx, dbgen.TouchVideoRequestedParams{SourceID: "abc", Quality: dbgen.VideoQuality720}); err != nil || n != 1 {
+		t.Fatalf("touch 720: %d, %v", n, err)
+	}
+	if n, err := d.DeleteVideosBySourceID(ctx, "abc"); err != nil || n != 2 {
+		t.Fatalf("delete all qualities: %d, %v", n, err)
 	}
 }
 

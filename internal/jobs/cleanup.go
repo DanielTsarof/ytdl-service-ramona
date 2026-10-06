@@ -85,11 +85,11 @@ func (r *Runner) cleanVideos(ctx context.Context, q *dbgen.Queries, cutoff time.
 			if err := r.app.DeleteStored(ctx, *v.StorageKey); err != nil {
 				return removed, err
 			}
-			if _, err := q.ClearVideoStorageKey(ctx, v.SourceID); err != nil {
+			if _, err := q.ClearVideoStorageKey(ctx, dbgen.ClearVideoStorageKeyParams{SourceID: v.SourceID, Quality: v.Quality}); err != nil {
 				return removed, err
 			}
 			removed++
-			r.log.Debug("evicted idle video", slog.String("source_id", v.SourceID), slog.Time("last_requested_at", v.LastRequestedAt))
+			r.log.Debug("evicted idle video", slog.String("source_id", v.SourceID), slog.String("quality", string(v.Quality)), slog.Time("last_requested_at", v.LastRequestedAt))
 		}
 		if len(rows) < cleanupBatch {
 			return removed, nil

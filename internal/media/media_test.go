@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -144,6 +145,47 @@ func TestLiveArgsProduceValidFiles(t *testing.T) {
 	}
 }
 
+// Stored MP4s must be H.264 + AAC with moov before mdat, whatever was
+// downloaded: AV1/VP9 files do not play in many players (GStreamer-based
+// ones in particular).
+func TestStoreArgsProduceValidFiles(t *testing.T) {
+	requireFFmpeg(t)
+	svc, _ := newService(t)
+	cases := []struct {
+		name         string
+		input        string
+		codec        string
+		wantReencode bool
+	}{
+		{"h264 remuxed", genInput(t, "h264.mp4", true, true, "libx264"), "avc1.64001f", false},
+		{"non-h264 re-encoded", genInput(t, "mpeg4.mp4", true, true, "mpeg4"), "av01.0.08M.08", true},
+		{"unknown codec re-encoded", genInput(t, "unknown.mp4", true, true, "mpeg4"), "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, reencode := storeArgs(ytdl.Info{VideoCodec: tc.codec}); reencode != tc.wantReencode {
+				t.Errorf("reencode = %v, want %v", reencode, tc.wantReencode)
+			}
+			out, err := svc.finalizeMP4(context.Background(), discard, ytdl.Info{VideoCodec: tc.codec}, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := ffprobe(t, data)
+			if got := p.codecs(); got["video"] != "h264" || got["audio"] != "aac" {
+				t.Errorf("codecs = %v, want h264 + aac", got)
+			}
+			moov, mdat := bytes.Index(data, []byte("moov")), bytes.Index(data, []byte("mdat"))
+			if moov < 0 || mdat < 0 || moov > mdat {
+				t.Errorf("moov at %d, mdat at %d: want moov first (faststart)", moov, mdat)
+			}
+		})
+	}
+}
+
 func newService(t *testing.T) (*Service, storage.Storage) {
 	t.Helper()
 	store, err := local.New(t.TempDir())
@@ -161,7 +203,7 @@ func TestStreamLive(t *testing.T) {
 	requireFFmpeg(t)
 	svc, _ := newService(t)
 	in := genInput(t, "muxed.mp4", true, true, "libx264")
-	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{in}}, Format: MP3, Key: Key("x", MP3)}
+	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{in}}, Format: MP3, Key: Key("x", MP3, QualityBest)}
 
 	var buf bytes.Buffer
 	if err := svc.Stream(context.Background(), src, &buf); err != nil {
@@ -175,7 +217,7 @@ func TestStreamLive(t *testing.T) {
 func TestStreamFromStorage(t *testing.T) {
 	svc, store := newService(t)
 	ctx := context.Background()
-	key := Key("x", MP3)
+	key := Key("x", MP3, QualityBest)
 	obj, err := store.Put(ctx, key, strings.NewReader("stored bytes"), storage.ObjectInfo{ContentType: MP3.MIME()})
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +258,7 @@ func TestStreamCancelStopsFFmpeg(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &cancelWriter{cancel: cancel}
-	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{in}}, Format: WAV, Key: Key("x", WAV)}
+	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{in}}, Format: WAV, Key: Key("x", WAV, QualityBest)}
 
 	err := svc.Stream(ctx, src, w)
 	if !errors.Is(err, context.Canceled) {
@@ -232,7 +274,7 @@ func TestStreamMissingInputFails(t *testing.T) {
 	svc, _ := newService(t)
 	// No WebpageURL, so the retry reuses the same input instead of calling
 	// yt-dlp, and both attempts fail before the first byte.
-	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{filepath.Join(t.TempDir(), "missing.mp4")}}, Format: MP3, Key: Key("x", MP3)}
+	src := Source{Info: ytdl.Info{ID: "x", Inputs: []string{filepath.Join(t.TempDir(), "missing.mp4")}}, Format: MP3, Key: Key("x", MP3, QualityBest)}
 	if err := svc.Stream(context.Background(), src, io.Discard); err == nil {
 		t.Fatal("expected error for missing input")
 	}
@@ -250,21 +292,21 @@ func TestFetchReturnsStoredWithoutDownloading(t *testing.T) {
 func TestLookup(t *testing.T) {
 	svc, store := newService(t)
 	ctx := context.Background()
-	if _, ok, err := svc.Lookup(ctx, "x", MP3); ok || err != nil {
+	if _, ok, err := svc.Lookup(ctx, "x", MP3, QualityBest); ok || err != nil {
 		t.Fatalf("missing file: ok=%v err=%v", ok, err)
 	}
-	_, err := store.Put(ctx, Key("x", MP3), strings.NewReader("data"), storage.ObjectInfo{
+	_, err := store.Put(ctx, Key("x", MP3, QualityBest), strings.NewReader("data"), storage.ObjectInfo{
 		ContentType: MP3.MIME(),
 		Meta:        map[string]string{"title": "T", "source-url": "https://youtu.be/x", "duration": "42"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, ok, err := svc.Lookup(ctx, "x", MP3)
+	src, ok, err := svc.Lookup(ctx, "x", MP3, QualityBest)
 	if err != nil || !ok || src.Stored == nil {
 		t.Fatalf("stored file: ok=%v err=%v", ok, err)
 	}
-	if src.Info.Title != "T" || src.Info.WebpageURL != "https://youtu.be/x" || src.Info.Duration != 42 || src.Key != Key("x", MP3) {
+	if src.Info.Title != "T" || src.Info.WebpageURL != "https://youtu.be/x" || src.Info.Duration != 42 || src.Key != Key("x", MP3, QualityBest) {
 		t.Fatalf("src = %+v", src)
 	}
 }
@@ -276,7 +318,7 @@ func TestKey(t *testing.T) {
 		"..":          "media/_../mp3.mp3",
 		"":            "media/_/mp3.mp3",
 	} {
-		got := Key(id, MP3)
+		got := Key(id, MP3, QualityBest)
 		if got != want {
 			t.Errorf("Key(%q) = %q, want %q", id, got, want)
 		}
@@ -294,5 +336,54 @@ func TestParseFormat(t *testing.T) {
 	}
 	if _, err := ParseFormat("flac"); err == nil {
 		t.Error("ParseFormat(flac) succeeded")
+	}
+}
+
+func TestParseQuality(t *testing.T) {
+	cases := []struct {
+		in   string
+		f    Format
+		want Quality
+	}{
+		{"", MP4, QualityBest},
+		{"best", MP4, QualityBest},
+		{" 720 ", MP4, Quality720},
+		{"1080", MP4, Quality1080},
+		{"480", MP4, Quality480},
+		{"360", MP4, Quality360},
+		// Audio has no quality: normalised so it stays one stored file.
+		{"720", MP3, QualityBest},
+		{"", WAV, QualityBest},
+	}
+	for _, tc := range cases {
+		got, err := ParseQuality(tc.in, tc.f)
+		if err != nil || got != tc.want {
+			t.Errorf("ParseQuality(%q, %s) = %q, %v; want %q", tc.in, tc.f, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"999", "720p", "4k"} {
+		if _, err := ParseQuality(bad, MP4); err == nil {
+			t.Errorf("ParseQuality(%q) succeeded", bad)
+		}
+		// Invalid values are rejected even for audio, which ignores valid ones.
+		if _, err := ParseQuality(bad, MP3); err == nil {
+			t.Errorf("ParseQuality(%q, mp3) succeeded", bad)
+		}
+	}
+	if Quality720.MaxRes() != 720 || QualityBest.MaxRes() != 0 {
+		t.Error("MaxRes mismatch")
+	}
+}
+
+func TestKeyQuality(t *testing.T) {
+	for q, want := range map[Quality]string{
+		QualityBest: "media/x/mp4.mp4", // unchanged from before qualities existed
+		"":          "media/x/mp4.mp4",
+		Quality720:  "media/x/mp4-720.mp4",
+		Quality360:  "media/x/mp4-360.mp4",
+	} {
+		if got := Key("x", MP4, q); got != want {
+			t.Errorf("Key(x, mp4, %q) = %q, want %q", q, got, want)
+		}
 	}
 }

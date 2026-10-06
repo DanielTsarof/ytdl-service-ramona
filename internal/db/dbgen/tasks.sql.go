@@ -24,7 +24,7 @@ WHERE id = (
     ORDER BY created_at
     FOR UPDATE SKIP LOCKED
     LIMIT 1)
-RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at
+RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality
 `
 
 type ClaimTaskParams struct {
@@ -64,6 +64,7 @@ func (q *Queries) ClaimTask(ctx context.Context, arg ClaimTaskParams) (Task, err
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
@@ -78,7 +79,7 @@ WHERE id = (
     ORDER BY next_webhook_at
     FOR UPDATE SKIP LOCKED
     LIMIT 1)
-RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at
+RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality
 `
 
 // Pushes next_webhook_at forward as a delivery lease, so another poller does
@@ -112,6 +113,7 @@ func (q *Queries) ClaimWebhook(ctx context.Context, leaseSeconds float64) (Task,
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
@@ -129,7 +131,7 @@ SET status          = 'succeeded',
     webhook_state   = CASE WHEN webhook_url IS NOT NULL THEN 'pending'::webhook_state ELSE 'none'::webhook_state END,
     next_webhook_at = now()
 WHERE id = $1
-RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at
+RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality
 `
 
 type CompleteTaskParams struct {
@@ -175,15 +177,16 @@ func (q *Queries) CompleteTask(ctx context.Context, arg CompleteTaskParams) (Tas
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
 
 const createTask = `-- name: CreateTask :one
-INSERT INTO tasks (user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, webhook_url)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO tasks (user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, quality, webhook_url)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (user_id, idempotency_key) DO NOTHING
-RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at
+RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality
 `
 
 type CreateTaskParams struct {
@@ -194,6 +197,7 @@ type CreateTaskParams struct {
 	Query          string
 	SourceUrl      string
 	Format         MediaFormat
+	Quality        VideoQuality
 	WebhookUrl     *string
 }
 
@@ -208,6 +212,7 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		arg.Query,
 		arg.SourceUrl,
 		arg.Format,
+		arg.Quality,
 		arg.WebhookUrl,
 	)
 	var i Task
@@ -237,6 +242,7 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
@@ -289,7 +295,7 @@ SET status          = 'failed',
     webhook_state   = CASE WHEN webhook_url IS NOT NULL THEN 'pending'::webhook_state ELSE 'none'::webhook_state END,
     next_webhook_at = now()
 WHERE id = $1
-RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at
+RETURNING id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality
 `
 
 type FailTaskParams struct {
@@ -326,12 +332,13 @@ func (q *Queries) FailTask(ctx context.Context, arg FailTaskParams) (Task, error
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
 
 const findReusableTask = `-- name: FindReusableTask :one
-SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at FROM tasks
+SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality FROM tasks
 WHERE user_id = $1 AND request_hash = $2
   AND (status IN ('queued', 'running') OR (status = 'succeeded' AND expires_at > now()))
 ORDER BY created_at DESC
@@ -374,12 +381,13 @@ func (q *Queries) FindReusableTask(ctx context.Context, arg FindReusableTaskPara
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
 
 const getTask = `-- name: GetTask :one
-SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at FROM tasks WHERE id = $1
+SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality FROM tasks WHERE id = $1
 `
 
 func (q *Queries) GetTask(ctx context.Context, id uuid.UUID) (Task, error) {
@@ -411,12 +419,13 @@ func (q *Queries) GetTask(ctx context.Context, id uuid.UUID) (Task, error) {
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }
 
 const getTaskByIdempotency = `-- name: GetTaskByIdempotency :one
-SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at FROM tasks WHERE user_id = $1 AND idempotency_key = $2
+SELECT id, user_id, api_key_id, idempotency_key, request_hash, query, source_url, format, source_id, title, storage_key, status, error, attempts, locked_until, webhook_url, webhook_state, webhook_attempts, next_webhook_at, webhook_error, history_id, created_at, started_at, completed_at, expires_at, quality FROM tasks WHERE user_id = $1 AND idempotency_key = $2
 `
 
 type GetTaskByIdempotencyParams struct {
@@ -453,6 +462,7 @@ func (q *Queries) GetTaskByIdempotency(ctx context.Context, arg GetTaskByIdempot
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.ExpiresAt,
+		&i.Quality,
 	)
 	return i, err
 }

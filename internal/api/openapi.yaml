@@ -147,6 +147,7 @@ paths:
         - $ref: "#/components/parameters/SourceURL"
         - $ref: "#/components/parameters/SourceName"
         - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Quality"
         - $ref: "#/components/parameters/Range"
         - $ref: "#/components/parameters/IfNoneMatch"
       responses:
@@ -170,6 +171,7 @@ paths:
         - $ref: "#/components/parameters/SourceURL"
         - $ref: "#/components/parameters/SourceName"
         - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Quality"
         - $ref: "#/components/parameters/Range"
         - $ref: "#/components/parameters/IfNoneMatch"
       responses:
@@ -201,6 +203,7 @@ paths:
         - $ref: "#/components/parameters/SourceURL"
         - $ref: "#/components/parameters/SourceName"
         - $ref: "#/components/parameters/Format"
+        - $ref: "#/components/parameters/Quality"
         - $ref: "#/components/parameters/Range"
         - $ref: "#/components/parameters/IfNoneMatch"
       responses:
@@ -255,10 +258,11 @@ paths:
                   name: me at the zoo
                   format: mp3
               byURL:
-                summary: By link
+                summary: By link, capped at 720p
                 value:
                   url: https://www.youtube.com/watch?v=jNQXAC9IVRw
                   format: mp4
+                  quality: "720"
               withWebhook:
                 summary: By name, delivered to a webhook
                 value:
@@ -763,6 +767,9 @@ paths:
       tags: [Catalog]
       operationId: getVideo
       summary: Get a video
+      description: One stored quality of the video (`best` unless `quality` is given).
+      parameters:
+        - $ref: "#/components/parameters/VideoQuality"
       responses:
         "200": { $ref: "#/components/responses/MediaItem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -774,7 +781,14 @@ paths:
       tags: [Catalog]
       operationId: deleteVideo
       summary: Delete a video
-      description: Removes the stored file (if any) and the catalog entry.
+      description: |
+        Removes the stored file (if any) and the catalog entry: for one
+        quality with `quality`, otherwise for every quality of the video.
+      parameters:
+        - name: quality
+          in: query
+          description: Only this quality. Omit to delete every quality.
+          schema: { $ref: "#/components/schemas/Quality" }
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -861,6 +875,21 @@ components:
       required: true
       description: Output format (case-insensitive).
       schema: { type: string, enum: [mp4, mp3, wav] }
+    Quality:
+      name: quality
+      in: query
+      description: |
+        Video resolution cap for `mp4`, by the smaller side of the frame:
+        `720` is 1280x720 landscape or 720x1280 portrait. The largest
+        resolution at or below the cap is used, or the smallest above it when
+        nothing smaller exists. `best` (the default) is uncapped. Each quality
+        is stored as its own file. Ignored for `mp3` and `wav`.
+      schema: { $ref: "#/components/schemas/Quality" }
+    VideoQuality:
+      name: quality
+      in: query
+      description: Which stored quality of the video. Defaults to `best`.
+      schema: { $ref: "#/components/schemas/Quality" }
     Range:
       name: Range
       in: header
@@ -1246,6 +1275,9 @@ components:
           maxLength: 300
           description: Search query, used when `url` is not given. Its first result is used.
         format: { type: string, enum: [mp4, mp3, wav] }
+        quality:
+          allOf: [{ $ref: "#/components/schemas/Quality" }]
+          description: Video resolution cap (see the `quality` query parameter of `/v1/files`). Defaults to `best`; ignored for `mp3` and `wav`.
         webhook_url:
           type: string
           maxLength: 2048
@@ -1258,6 +1290,7 @@ components:
         - id
         - status
         - format
+        - quality
         - source_id
         - error
         - webhook_url
@@ -1272,6 +1305,9 @@ components:
         id: { type: string, format: uuid }
         status: { type: string, enum: [queued, running, succeeded, failed] }
         format: { type: string, enum: [mp4, mp3, wav] }
+        quality:
+          allOf: [{ $ref: "#/components/schemas/Quality" }]
+          description: Always `best` for `mp3` and `wav`.
         query: { type: string, description: "The search name, if the task was created by name rather than by link." }
         url: { type: string, description: "The link, if the task was created with one." }
         source_id: { type: string, nullable: true }
@@ -1339,6 +1375,11 @@ components:
         duration_ms: { type: integer, format: int64, nullable: true }
         created_at: { type: string, format: date-time }
 
+    Quality:
+      type: string
+      enum: [best, "1080", "720", "480", "360"]
+      default: best
+
     Media:
       type: object
       additionalProperties: false
@@ -1356,6 +1397,9 @@ components:
       properties:
         source_id: { type: string }
         format: { type: string, enum: [mp4, mp3, wav] }
+        quality:
+          allOf: [{ $ref: "#/components/schemas/Quality" }]
+          description: Videos only; audio has no quality.
         url: { type: string }
         title: { type: string }
         duration_seconds: { type: integer, nullable: true }

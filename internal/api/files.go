@@ -31,7 +31,7 @@ func upstream(err error) error {
 // It is idempotent: repeating it serves the same stored file, and a file
 // already in storage is never downloaded again.
 func (s *Server) getFile(c *gin.Context) {
-	req, err := app.ParseRequest(c.Query("url"), c.Query("name"), c.Query("format"))
+	req, err := app.ParseRequest(c.Query("url"), c.Query("name"), c.Query("format"), c.Query("quality"))
 	if err != nil {
 		s.fail(c, err)
 		return
@@ -53,7 +53,7 @@ func (s *Server) getFile(c *gin.Context) {
 // transcodes the source live into the response, so playback starts without
 // waiting for a download. Live output is not stored.
 func (s *Server) stream(c *gin.Context) {
-	req, err := app.ParseRequest(c.Query("url"), c.Query("name"), c.Query("format"))
+	req, err := app.ParseRequest(c.Query("url"), c.Query("name"), c.Query("format"), c.Query("quality"))
 	if err != nil {
 		s.fail(c, err)
 		return
