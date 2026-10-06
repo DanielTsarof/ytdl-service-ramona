@@ -1,0 +1,16 @@
+# Secrets must never reach the build context.
+.env
+.env.*
+!.env.example
+*.cookies.txt
+
+.git
+.gitignore
+data/
+bin/
+*.test
+*.out
+.idea/
+.vscode/
+Dockerfile
+compose.yaml

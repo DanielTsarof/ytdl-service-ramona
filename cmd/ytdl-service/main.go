@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	ytdlp "github.com/lrstanley/go-ytdlp"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/DanielTsarof/ytdl-service-ramona/internal/api"
@@ -46,6 +47,13 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if err := installYtdlp(ctx, log); err != nil {
+		return err
+	}
+	if cfg.YtdlpSelfUpdate {
+		go selfUpdateYtdlp(ctx, log)
+	}
 
 	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -172,4 +180,60 @@ func bootstrapAdmin(ctx context.Context, database *db.DB, cfg config.BootstrapAd
 		log.Info("bootstrap admin created with the configured API key", slog.String("email", cfg.Email))
 	}
 	return nil
+}
+
+// installYtdlp makes sure a yt-dlp binary is available: one already in the
+// go-ytdlp cache (a volume in Docker) or on PATH is used as is, otherwise the
+// release is downloaded into the cache. AllowVersionMismatch: go-ytdlp pins an
+// old release, and the self-update below must not be undone on next start.
+func installYtdlp(ctx context.Context, log *slog.Logger) error {
+	start := time.Now()
+	res, err := ytdlp.Install(ctx, &ytdlp.InstallOptions{AllowVersionMismatch: true})
+	if err != nil {
+		return fmt.Errorf("yt-dlp install: %w", err)
+	}
+	log.Info("yt-dlp binary ready",
+		slog.String("path", res.Executable),
+		slog.Bool("downloaded", res.Downloaded),
+		slog.Duration("elapsed", time.Since(start)))
+	return nil
+}
+
+// selfUpdateYtdlp moves yt-dlp to the latest stable release in the
+// background, with retries: DNS can be flaky in the first seconds after a
+// container starts, and the update must never delay startup. A binary
+// installed by a package manager cannot self-update; that only logs a
+// warning.
+func selfUpdateYtdlp(ctx context.Context, log *slog.Logger) {
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		start := time.Now()
+		updateCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		res, err := ytdlp.New().UpdateTo(updateCtx, "stable@latest")
+		cancel()
+		if err == nil {
+			out := ""
+			if res != nil {
+				out = res.Stdout
+			}
+			log.Info("yt-dlp self-update finished",
+				slog.Int("attempt", attempt),
+				slog.Duration("elapsed", time.Since(start)),
+				slog.String("output", out))
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Warn("yt-dlp self-update attempt failed",
+			slog.Int("attempt", attempt), slog.Int("of", attempts),
+			slog.Duration("elapsed", time.Since(start)),
+			slog.Any("err", err))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+	}
+	log.Warn("yt-dlp self-update gave up; continuing with the installed binary")
 }

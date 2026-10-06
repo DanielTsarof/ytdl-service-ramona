@@ -31,6 +31,8 @@ type Options struct {
 	PathStyle bool
 	// Prefix is prepended to every key, so several services can share a bucket.
 	Prefix string
+	// CreateBucket creates Bucket if it does not exist yet.
+	CreateBucket bool
 }
 
 type Store struct {
@@ -61,6 +63,11 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		}
 		o.UsePathStyle = opts.PathStyle
 	})
+	if opts.CreateBucket {
+		if err := ensureBucket(ctx, client, opts.Bucket); err != nil {
+			return nil, err
+		}
+	}
 	return &Store{
 		client:   client,
 		uploader: transfermanager.New(client),
@@ -68,6 +75,27 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		bucket:   opts.Bucket,
 		prefix:   strings.Trim(opts.Prefix, "/"),
 	}, nil
+}
+
+// ensureBucket creates bucket unless it exists. A concurrent creator (another
+// instance starting at the same time) is not an error.
+func ensureBucket(ctx context.Context, client *s3.Client, bucket string) error {
+	_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	if err == nil {
+		return nil
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) || (apiErr.ErrorCode() != "NotFound" && apiErr.ErrorCode() != "NoSuchBucket") {
+		return fmt.Errorf("s3 storage: check bucket %q: %w", bucket, err)
+	}
+	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "BucketAlreadyOwnedByYou" || apiErr.ErrorCode() == "BucketAlreadyExists") {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("s3 storage: create bucket %q: %w", bucket, err)
+	}
+	return nil
 }
 
 func (s *Store) objectKey(key string) (string, error) {

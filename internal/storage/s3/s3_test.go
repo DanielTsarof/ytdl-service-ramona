@@ -16,11 +16,13 @@ import (
 
 // TestConformance runs against a real S3-compatible store, e.g. MinIO:
 //
-//	docker run --rm -p 9000:9000 minio/minio server /data
-//	# create bucket "ytdl-test" (mc mb / console), then:
-//	S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=ytdl-test \
-//	AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+//	docker run -d --rm --name ytdl-s3-test -p 19100:9000 \
+//	  -e RUSTFS_ACCESS_KEY=testkey -e RUSTFS_SECRET_KEY=testsecret123 rustfs/rustfs:1.0.1
+//	S3_TEST_ENDPOINT=http://localhost:19100 \
+//	AWS_ACCESS_KEY_ID=testkey AWS_SECRET_ACCESS_KEY=testsecret123 \
 //	go test ./internal/storage/s3/
+//
+// The bucket is created if missing (CreateBucket), which exercises that too.
 func TestConformance(t *testing.T) {
 	endpoint := os.Getenv("S3_TEST_ENDPOINT")
 	if endpoint == "" {
@@ -37,6 +39,8 @@ func TestConformance(t *testing.T) {
 		Endpoint:  endpoint,
 		PathStyle: true,
 		Prefix:    "conformance",
+
+		CreateBucket: true,
 	})
 	if err != nil {
 		t.Fatal(err)

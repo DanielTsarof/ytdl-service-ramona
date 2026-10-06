@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Go service (module `github.com/DanielTsarof/ytdl-service-ramona`, Go 1.25.1) that downloads media with yt-dlp and serves it over an HTTP API (Gin) as MP4/MP3/WAV files, live-transcoded streams, or async tasks delivered by webhook. Much of the yt-dlp/ffmpeg logic was ported from the Ramona-go Discord bot (`../Ramona-go/modules/music`).
 
-Runtime requirements: `yt-dlp` and `ffmpeg`/`ffprobe` on PATH, PostgreSQL, and Redis. All settings are in `.env.example`.
+Runtime requirements: `ffmpeg` on PATH, PostgreSQL, and Redis. yt-dlp is installed by the service itself at startup (see Docker below). Modern yt-dlp also needs `deno` for YouTube. All settings are in `.env.example`.
 
 ## Commands
 
 - Run: `go run ./cmd/ytdl-service` (reads env or `.env`; migrates the DB on startup)
+- Full stack (app + Postgres + Redis + RustFS S3): `cp .env.example .env && docker compose up -d --build`
 - Build / vet: `go build ./... && go vet ./... && go vet -tags integration ./...`
 - Unit tests (no services, no network; ffmpeg tests skip without ffmpeg): `go test ./...`
 - Single test: `go test ./internal/api -run '^TestTaskLifecycleAndIdempotency$' -v`
@@ -22,7 +23,11 @@ Runtime requirements: `yt-dlp` and `ffmpeg`/`ffprobe` on PATH, PostgreSQL, and R
   TEST_REDIS_URL='redis://localhost:16379/15' go test -race ./...
   ```
 - Integration (real yt-dlp + YouTube): `go test -tags integration ./internal/media -run Integration -v` (`INTEGRATION_URL` and `YTDLP_COOKIES` are optional)
-- S3 conformance (skipped unless set): `S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=ytdl-test AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... go test ./internal/storage/s3`
+- S3 conformance (skipped unless set; the bucket is created if missing):
+  ```
+  docker run -d --rm --name ytdl-s3-test -p 19100:9000 -e RUSTFS_ACCESS_KEY=testkey -e RUSTFS_SECRET_KEY=testsecret123 rustfs/rustfs:1.0.1
+  S3_TEST_ENDPOINT=http://localhost:19100 AWS_ACCESS_KEY_ID=testkey AWS_SECRET_ACCESS_KEY=testsecret123 go test ./internal/storage/s3
+  ```
 - Regenerate sqlc code after editing `internal/db/queries/*.sql` or migrations: `go generate ./internal/db` (needs cgo; sqlc runs via `go run` at a pinned version and is not in go.mod)
 
 Keep the `go` directive at 1.25.1: `go get ...@latest` can pull deps that bump it, so pin such deps instead, and use `GOTOOLCHAIN=local` to catch this. Current pins held back for this reason:
@@ -30,6 +35,18 @@ Keep the `go` directive at 1.25.1: `go get ...@latest` can pull deps that bump i
 - `pressly/goose/v3` v3.27.0 (v3.27.1+ needs 1.25.7)
 - `redis/go-redis/v9` v9.22.0 (v9.23+ needs 1.26)
 - sqlc v1.30.0 (v1.31+ needs 1.26)
+
+## Docker
+
+- `Dockerfile` is multi-stage: a static `CGO_ENABLED=0` build (cross-compiled for multi-arch) goes onto `alpine:3.23` with `ffmpeg` and `deno`. It runs as uid 10001; the image is about 290 MB.
+- yt-dlp follows the Ramona-go pattern and is **not** in the image:
+  - `main.go` calls `ytdlp.Install(AllowVersionMismatch)`, which downloads `yt-dlp_musllinux` into `~/.cache/go-ytdlp` (the `ytdlp-cache` volume) on first start.
+  - `selfUpdateYtdlp` then runs `UpdateTo("stable@latest")` in the background. It is turned off with `YTDLP_SELF_UPDATE=false`.
+  - The file keeps go-ytdlp's pinned version in its name after an update; the binary inside is current.
+- In `compose.yaml`, the app's `environment:` sets the service wiring (DB, Redis, S3 endpoint, `S3_CREATE_BUCKET=true`) and overrides `.env`.
+- RustFS (`rustfs/rustfs:1.0.1`) is the bundled S3. MinIO is no longer published on Docker Hub. Its console is on `127.0.0.1:9001`.
+- Redis runs without persistence, with `volatile-lru`, so cache generation counters are never evicted.
+- `./data` is mounted read-write at `/data` for `YTDLP_COOKIES`. It must be writable by uid 10001.
 
 ## Architecture
 

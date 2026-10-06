@@ -24,6 +24,8 @@ func New(ctx context.Context, cfg config.Storage) (storage.Storage, error) {
 			Endpoint:  cfg.S3Endpoint,
 			PathStyle: cfg.S3PathStyle,
 			Prefix:    cfg.S3Prefix,
+
+			CreateBucket: cfg.S3CreateBucket,
 		})
 	}
 	return nil, fmt.Errorf("unknown STORAGE_BACKEND %q (want local or s3)", cfg.Backend)

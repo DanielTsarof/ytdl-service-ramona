@@ -18,6 +18,10 @@ type Config struct {
 	DatabaseURL string `env:"DATABASE_URL" env-required:"true"`
 	// YtdlpCookies: path to a Netscape-format cookies.txt passed to yt-dlp (empty = off).
 	YtdlpCookies string `env:"YTDLP_COOKIES"`
+	// YtdlpSelfUpdate updates the yt-dlp binary to the latest stable release
+	// in the background at startup; YouTube breaks old releases regularly.
+	// Turn off to keep a pinned binary.
+	YtdlpSelfUpdate bool `env:"YTDLP_SELF_UPDATE" env-default:"true"`
 	// WorkDir holds per-job scratch directories while yt-dlp downloads and
 	// post-processes; finished files are moved into Storage and the scratch
 	// dir is removed. Empty = <os temp>/ytdl-service.
@@ -93,6 +97,9 @@ type Storage struct {
 	// S3PathStyle is required by most self-hosted S3-compatible stores.
 	S3PathStyle bool   `env:"S3_PATH_STYLE" env-default:"false"`
 	S3Prefix    string `env:"S3_PREFIX"`
+	// S3CreateBucket creates S3Bucket on startup if it does not exist (for
+	// self-hosted stores, e.g. the compose stack). Needs s3:CreateBucket.
+	S3CreateBucket bool `env:"S3_CREATE_BUCKET" env-default:"false"`
 }
 
 func Load() (*Config, error) {
@@ -121,6 +128,7 @@ func (c *Config) LogAttrs() []any {
 	return []any{
 		slog.String("database", databaseLabel(c.DatabaseURL)),
 		slog.String("ytdlp_cookies", c.YtdlpCookies),
+		slog.Bool("ytdlp_self_update", c.YtdlpSelfUpdate),
 		slog.String("work_dir", c.WorkDir),
 		slog.Int("max_duration_seconds", c.MaxDurationSeconds),
 		slog.String("log_level", c.LogLevel),
@@ -132,6 +140,7 @@ func (c *Config) LogAttrs() []any {
 		slog.String("s3_endpoint", c.Storage.S3Endpoint),
 		slog.Bool("s3_path_style", c.Storage.S3PathStyle),
 		slog.String("s3_prefix", c.Storage.S3Prefix),
+		slog.Bool("s3_create_bucket", c.Storage.S3CreateBucket),
 		slog.String("http_addr", c.HTTP.Addr),
 		slog.String("redis", redisLabel(c.HTTP.RedisURL)),
 		slog.Duration("file_idle_ttl", c.Jobs.FileIdleTTL),

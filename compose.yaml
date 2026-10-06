@@ -1,0 +1,116 @@
+# ytdl-service with its dependencies: PostgreSQL, Redis and an S3-compatible
+# object store (RustFS). Settings come from .env (see .env.example); values
+# that wire the services together are set below and override .env.
+#
+#   cp .env.example .env    # set BOOTSTRAP_ADMIN_EMAIL, change the passwords
+#   docker compose up -d --build
+
+name: ytdl-service
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m" # rotate once a log file reaches this size
+    max-file: "5"   # keep this many rotated files
+
+services:
+  app:
+    build: .
+    image: ytdl-service:latest
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ytdl}:${POSTGRES_PASSWORD:-ytdl-change-me}@postgres:5432/${POSTGRES_DB:-ytdl}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      HTTP_ADDR: ":8080"
+      WORK_DIR: /work
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT: http://s3:9000
+      S3_BUCKET: ${S3_BUCKET:-ytdl-media}
+      S3_REGION: us-east-1
+      S3_PATH_STYLE: "true"
+      S3_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-ytdl}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-ytdl-secret-change-me}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # Same as Ramona-go: IPv4 only (yt-dlp is also run with --force-ipv4).
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    volumes:
+      # yt-dlp binary installed and self-updated by the service.
+      - ytdlp-cache:/home/app/.cache/go-ytdlp
+      # scratch space for downloads in progress.
+      - work:/work
+      # optional cookies (YTDLP_COOKIES=/data/cookies.txt); read-write because
+      # yt-dlp rewrites rotated cookies. Must be writable by uid 10001.
+      - ./data:/data
+    logging: *logging
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ytdl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ytdl-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-ytdl}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Cache and rate-limit state only: nothing to persist. volatile-lru evicts
+    # only keys with a TTL, never the cache generation counters.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  s3:
+    image: rustfs/rustfs:1.0.1
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-ytdl}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-ytdl-secret-change-me}
+    volumes:
+      - s3data:/data
+    # Web console (S3 browser) on localhost only; the S3 API stays internal.
+    ports:
+      - "127.0.0.1:${S3_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+volumes:
+  pgdata:
+  s3data:
+  ytdlp-cache:
+  work:
