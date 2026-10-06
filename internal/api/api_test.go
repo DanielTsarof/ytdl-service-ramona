@@ -540,6 +540,54 @@ func TestTaskLifecycleAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestTaskByName(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	const name = "some song"
+	id := fakeID(name)
+
+	created := e.json(e.do("POST", "/v1/tasks", e.user, `{"name":"`+name+`","format":"mp3"}`), 202)
+	if created["query"] != name || created["url"] != nil {
+		t.Fatalf("created by name: %v", created)
+	}
+	done := e.waitTask(e.user, created["id"].(string), finished)
+	if done["status"] != "succeeded" || done["source_id"] != id {
+		t.Fatalf("name task: %v", done)
+	}
+	if q := e.fake.resolvedQueries(); len(q) != 1 || q[0] != name {
+		t.Fatalf("resolved queries = %v, want [%q]", q, name)
+	}
+	w := e.do("GET", "/v1/tasks/"+created["id"].(string)+"/file", e.user, "")
+	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), fileBytes(id, media.MP3)) {
+		t.Fatalf("task file: %d", w.Code)
+	}
+
+	// The same name again is the same task (implicit idempotency).
+	again := e.json(e.do("POST", "/v1/tasks", e.user, `{"name":"`+name+`","format":"mp3"}`), 200)
+	if again["id"] != created["id"] {
+		t.Fatalf("repeat name task: %v vs %v", again["id"], created["id"])
+	}
+
+	// url wins over name for tasks too.
+	both := e.json(e.do("POST", "/v1/tasks", e.user, `{"url":"`+ytURL+`","name":"ignored","format":"wav"}`), 202)
+	if both["url"] != ytURL || both["query"] != nil {
+		t.Fatalf("url+name task: %v", both)
+	}
+	if d := e.waitTask(e.user, both["id"].(string), finished); d["source_id"] != "dQw4w9WgXcQ" {
+		t.Fatalf("url+name resolved to %v", d["source_id"])
+	}
+
+	// Neither url nor name.
+	if w := e.do("POST", "/v1/tasks", e.user, `{"format":"mp3"}`); w.Code != 400 {
+		t.Fatalf("no source: %d", w.Code)
+	}
+
+	h := e.json(e.do("GET", "/v1/history?kind=task&q=some", e.user, ""), 200)
+	items := h["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["query"] != name || items[0].(map[string]any)["status"] != "ok" {
+		t.Fatalf("history for name task: %v", items)
+	}
+}
+
 func TestWebhookDelivery(t *testing.T) {
 	e := newEnv(t, envOpts{})
 	secret := e.json(e.do("GET", "/v1/me/webhook-secret", e.user, ""), 200)["webhook_secret"].(string)
