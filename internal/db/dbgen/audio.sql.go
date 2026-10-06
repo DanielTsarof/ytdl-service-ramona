@@ -7,6 +7,7 @@ package dbgen
 
 import (
 	"context"
+	"time"
 )
 
 const clearAudioStorageKey = `-- name: ClearAudioStorageKey :execrows
@@ -27,6 +28,17 @@ func (q *Queries) ClearAudioStorageKey(ctx context.Context, arg ClearAudioStorag
 	return result.RowsAffected(), nil
 }
 
+const countAudio = `-- name: CountAudio :one
+SELECT count(*) FROM audio
+`
+
+func (q *Queries) CountAudio(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countAudio)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteAudio = `-- name: DeleteAudio :execrows
 DELETE FROM audio WHERE source_id = $1 AND format = $2
 `
@@ -45,7 +57,7 @@ func (q *Queries) DeleteAudio(ctx context.Context, arg DeleteAudioParams) (int64
 }
 
 const getAudio = `-- name: GetAudio :one
-SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at FROM audio WHERE source_id = $1 AND format = $2
+SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM audio WHERE source_id = $1 AND format = $2
 `
 
 type GetAudioParams struct {
@@ -66,12 +78,40 @@ func (q *Queries) GetAudio(ctx context.Context, arg GetAudioParams) (Audio, erro
 		&i.StorageKey,
 		&i.LastUploadedAt,
 		&i.CreatedAt,
+		&i.LastRequestedAt,
+	)
+	return i, err
+}
+
+const getAudioByURL = `-- name: GetAudioByURL :one
+SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM audio WHERE url = $1 AND format = $2 ORDER BY last_requested_at DESC LIMIT 1
+`
+
+type GetAudioByURLParams struct {
+	Url    string
+	Format AudioFormat
+}
+
+func (q *Queries) GetAudioByURL(ctx context.Context, arg GetAudioByURLParams) (Audio, error) {
+	row := q.db.QueryRow(ctx, getAudioByURL, arg.Url, arg.Format)
+	var i Audio
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.Format,
+		&i.Url,
+		&i.Title,
+		&i.DurationSeconds,
+		&i.StorageKey,
+		&i.LastUploadedAt,
+		&i.CreatedAt,
+		&i.LastRequestedAt,
 	)
 	return i, err
 }
 
 const listAudio = `-- name: ListAudio :many
-SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at FROM audio
+SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM audio
 ORDER BY last_uploaded_at DESC, id DESC
 LIMIT $1 OFFSET $2
 `
@@ -100,6 +140,7 @@ func (q *Queries) ListAudio(ctx context.Context, arg ListAudioParams) ([]Audio, 
 			&i.StorageKey,
 			&i.LastUploadedAt,
 			&i.CreatedAt,
+			&i.LastRequestedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -111,6 +152,75 @@ func (q *Queries) ListAudio(ctx context.Context, arg ListAudioParams) ([]Audio, 
 	return items, nil
 }
 
+const listIdleAudio = `-- name: ListIdleAudio :many
+SELECT id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM audio a
+WHERE a.storage_key IS NOT NULL
+  AND a.last_requested_at < $1::timestamptz
+  AND NOT EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.storage_key = a.storage_key
+        AND (t.expires_at IS NULL OR t.expires_at > now())
+        AND t.status IN ('queued', 'running', 'succeeded'))
+ORDER BY a.last_requested_at
+LIMIT $2
+`
+
+type ListIdleAudioParams struct {
+	Cutoff    time.Time
+	BatchSize int32
+}
+
+// Stored files not requested since the cutoff and not pinned by a task whose
+// result is still downloadable.
+func (q *Queries) ListIdleAudio(ctx context.Context, arg ListIdleAudioParams) ([]Audio, error) {
+	rows, err := q.db.Query(ctx, listIdleAudio, arg.Cutoff, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Audio
+	for rows.Next() {
+		var i Audio
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.Format,
+			&i.Url,
+			&i.Title,
+			&i.DurationSeconds,
+			&i.StorageKey,
+			&i.LastUploadedAt,
+			&i.CreatedAt,
+			&i.LastRequestedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const touchAudioRequested = `-- name: TouchAudioRequested :execrows
+UPDATE audio SET last_requested_at = now() WHERE source_id = $1 AND format = $2
+`
+
+type TouchAudioRequestedParams struct {
+	SourceID string
+	Format   AudioFormat
+}
+
+// Called whenever a stored file is served; keeps it from idle eviction.
+func (q *Queries) TouchAudioRequested(ctx context.Context, arg TouchAudioRequestedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, touchAudioRequested, arg.SourceID, arg.Format)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const upsertAudio = `-- name: UpsertAudio :one
 INSERT INTO audio (source_id, format, url, title, duration_seconds, storage_key)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -119,8 +229,9 @@ SET url              = EXCLUDED.url,
     title            = EXCLUDED.title,
     duration_seconds = EXCLUDED.duration_seconds,
     storage_key      = EXCLUDED.storage_key,
-    last_uploaded_at = now()
-RETURNING id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at
+    last_uploaded_at = now(),
+    last_requested_at = now()
+RETURNING id, source_id, format, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at
 `
 
 type UpsertAudioParams struct {
@@ -154,6 +265,7 @@ func (q *Queries) UpsertAudio(ctx context.Context, arg UpsertAudioParams) (Audio
 		&i.StorageKey,
 		&i.LastUploadedAt,
 		&i.CreatedAt,
+		&i.LastRequestedAt,
 	)
 	return i, err
 }

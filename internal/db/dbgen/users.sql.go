@@ -9,10 +9,21 @@ import (
 	"context"
 )
 
+const countUsers = `-- name: CountUsers :one
+SELECT count(*) FROM users
+`
+
+func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsers)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (username, email, role)
 VALUES ($1, $2, $3)
-RETURNING id, username, email, role, registered_at
+RETURNING id, username, email, role, registered_at, webhook_secret
 `
 
 type CreateUserParams struct {
@@ -30,6 +41,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Email,
 		&i.Role,
 		&i.RegisteredAt,
+		&i.WebhookSecret,
 	)
 	return i, err
 }
@@ -48,7 +60,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id int64) (int64, error) {
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, username, email, role, registered_at FROM users WHERE lower(email) = lower($1)
+SELECT id, username, email, role, registered_at, webhook_secret FROM users WHERE lower(email) = lower($1)
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -60,12 +72,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Email,
 		&i.Role,
 		&i.RegisteredAt,
+		&i.WebhookSecret,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, email, role, registered_at FROM users WHERE id = $1
+SELECT id, username, email, role, registered_at, webhook_secret FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
@@ -77,12 +90,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.Email,
 		&i.Role,
 		&i.RegisteredAt,
+		&i.WebhookSecret,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, email, role, registered_at FROM users
+SELECT id, username, email, role, registered_at, webhook_secret FROM users
 ORDER BY id
 LIMIT $1 OFFSET $2
 `
@@ -107,6 +121,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.Email,
 			&i.Role,
 			&i.RegisteredAt,
+			&i.WebhookSecret,
 		); err != nil {
 			return nil, err
 		}
@@ -118,9 +133,62 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 	return items, nil
 }
 
+const setWebhookSecret = `-- name: SetWebhookSecret :one
+UPDATE users SET webhook_secret = $2 WHERE id = $1
+RETURNING webhook_secret
+`
+
+type SetWebhookSecretParams struct {
+	ID            int64
+	WebhookSecret string
+}
+
+func (q *Queries) SetWebhookSecret(ctx context.Context, arg SetWebhookSecretParams) (string, error) {
+	row := q.db.QueryRow(ctx, setWebhookSecret, arg.ID, arg.WebhookSecret)
+	var webhook_secret string
+	err := row.Scan(&webhook_secret)
+	return webhook_secret, err
+}
+
+const updateUser = `-- name: UpdateUser :one
+UPDATE users
+SET username = coalesce($1, username),
+    email    = coalesce($2, email),
+    role     = coalesce($3, role)
+WHERE id = $4
+RETURNING id, username, email, role, registered_at, webhook_secret
+`
+
+type UpdateUserParams struct {
+	Username *string
+	Email    *string
+	Role     NullUserRole
+	ID       int64
+}
+
+// Partial update: NULL arguments keep the current value.
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateUser,
+		arg.Username,
+		arg.Email,
+		arg.Role,
+		arg.ID,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Email,
+		&i.Role,
+		&i.RegisteredAt,
+		&i.WebhookSecret,
+	)
+	return i, err
+}
+
 const updateUserRole = `-- name: UpdateUserRole :one
 UPDATE users SET role = $2 WHERE id = $1
-RETURNING id, username, email, role, registered_at
+RETURNING id, username, email, role, registered_at, webhook_secret
 `
 
 type UpdateUserRoleParams struct {
@@ -137,6 +205,7 @@ func (q *Queries) UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) 
 		&i.Email,
 		&i.Role,
 		&i.RegisteredAt,
+		&i.WebhookSecret,
 	)
 	return i, err
 }

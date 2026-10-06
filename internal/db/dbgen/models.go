@@ -8,6 +8,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type AudioFormat string
@@ -65,6 +67,253 @@ func AllAudioFormatValues() []AudioFormat {
 	return []AudioFormat{
 		AudioFormatMp3,
 		AudioFormatWav,
+	}
+}
+
+type MediaFormat string
+
+const (
+	MediaFormatMp4 MediaFormat = "mp4"
+	MediaFormatMp3 MediaFormat = "mp3"
+	MediaFormatWav MediaFormat = "wav"
+)
+
+func (e *MediaFormat) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = MediaFormat(s)
+	case string:
+		*e = MediaFormat(s)
+	default:
+		return fmt.Errorf("unsupported scan type for MediaFormat: %T", src)
+	}
+	return nil
+}
+
+type NullMediaFormat struct {
+	MediaFormat MediaFormat
+	Valid       bool // Valid is true if MediaFormat is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullMediaFormat) Scan(value interface{}) error {
+	if value == nil {
+		ns.MediaFormat, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.MediaFormat.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullMediaFormat) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.MediaFormat), nil
+}
+
+func (e MediaFormat) Valid() bool {
+	switch e {
+	case MediaFormatMp4,
+		MediaFormatMp3,
+		MediaFormatWav:
+		return true
+	}
+	return false
+}
+
+func AllMediaFormatValues() []MediaFormat {
+	return []MediaFormat{
+		MediaFormatMp4,
+		MediaFormatMp3,
+		MediaFormatWav,
+	}
+}
+
+type RequestKind string
+
+const (
+	RequestKindFile   RequestKind = "file"
+	RequestKindStream RequestKind = "stream"
+	RequestKindTask   RequestKind = "task"
+)
+
+func (e *RequestKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = RequestKind(s)
+	case string:
+		*e = RequestKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for RequestKind: %T", src)
+	}
+	return nil
+}
+
+type NullRequestKind struct {
+	RequestKind RequestKind
+	Valid       bool // Valid is true if RequestKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullRequestKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.RequestKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.RequestKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullRequestKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.RequestKind), nil
+}
+
+func (e RequestKind) Valid() bool {
+	switch e {
+	case RequestKindFile,
+		RequestKindStream,
+		RequestKindTask:
+		return true
+	}
+	return false
+}
+
+func AllRequestKindValues() []RequestKind {
+	return []RequestKind{
+		RequestKindFile,
+		RequestKindStream,
+		RequestKindTask,
+	}
+}
+
+type RequestStatus string
+
+const (
+	RequestStatusPending RequestStatus = "pending"
+	RequestStatusOk      RequestStatus = "ok"
+	RequestStatusError   RequestStatus = "error"
+)
+
+func (e *RequestStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = RequestStatus(s)
+	case string:
+		*e = RequestStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for RequestStatus: %T", src)
+	}
+	return nil
+}
+
+type NullRequestStatus struct {
+	RequestStatus RequestStatus
+	Valid         bool // Valid is true if RequestStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullRequestStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.RequestStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.RequestStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullRequestStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.RequestStatus), nil
+}
+
+func (e RequestStatus) Valid() bool {
+	switch e {
+	case RequestStatusPending,
+		RequestStatusOk,
+		RequestStatusError:
+		return true
+	}
+	return false
+}
+
+func AllRequestStatusValues() []RequestStatus {
+	return []RequestStatus{
+		RequestStatusPending,
+		RequestStatusOk,
+		RequestStatusError,
+	}
+}
+
+type TaskStatus string
+
+const (
+	TaskStatusQueued    TaskStatus = "queued"
+	TaskStatusRunning   TaskStatus = "running"
+	TaskStatusSucceeded TaskStatus = "succeeded"
+	TaskStatusFailed    TaskStatus = "failed"
+)
+
+func (e *TaskStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = TaskStatus(s)
+	case string:
+		*e = TaskStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for TaskStatus: %T", src)
+	}
+	return nil
+}
+
+type NullTaskStatus struct {
+	TaskStatus TaskStatus
+	Valid      bool // Valid is true if TaskStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullTaskStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.TaskStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.TaskStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullTaskStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.TaskStatus), nil
+}
+
+func (e TaskStatus) Valid() bool {
+	switch e {
+	case TaskStatusQueued,
+		TaskStatusRunning,
+		TaskStatusSucceeded,
+		TaskStatusFailed:
+		return true
+	}
+	return false
+}
+
+func AllTaskStatusValues() []TaskStatus {
+	return []TaskStatus{
+		TaskStatusQueued,
+		TaskStatusRunning,
+		TaskStatusSucceeded,
+		TaskStatusFailed,
 	}
 }
 
@@ -126,6 +375,70 @@ func AllUserRoleValues() []UserRole {
 	}
 }
 
+type WebhookState string
+
+const (
+	WebhookStateNone      WebhookState = "none"
+	WebhookStatePending   WebhookState = "pending"
+	WebhookStateDelivered WebhookState = "delivered"
+	WebhookStateFailed    WebhookState = "failed"
+)
+
+func (e *WebhookState) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WebhookState(s)
+	case string:
+		*e = WebhookState(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WebhookState: %T", src)
+	}
+	return nil
+}
+
+type NullWebhookState struct {
+	WebhookState WebhookState
+	Valid        bool // Valid is true if WebhookState is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWebhookState) Scan(value interface{}) error {
+	if value == nil {
+		ns.WebhookState, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WebhookState.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWebhookState) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WebhookState), nil
+}
+
+func (e WebhookState) Valid() bool {
+	switch e {
+	case WebhookStateNone,
+		WebhookStatePending,
+		WebhookStateDelivered,
+		WebhookStateFailed:
+		return true
+	}
+	return false
+}
+
+func AllWebhookStateValues() []WebhookState {
+	return []WebhookState{
+		WebhookStateNone,
+		WebhookStatePending,
+		WebhookStateDelivered,
+		WebhookStateFailed,
+	}
+}
+
 type ApiKey struct {
 	ID         int64
 	UserID     int64
@@ -147,14 +460,63 @@ type Audio struct {
 	StorageKey      *string
 	LastUploadedAt  time.Time
 	CreatedAt       time.Time
+	LastRequestedAt time.Time
+}
+
+type RequestHistory struct {
+	ID         int64
+	UserID     int64
+	ApiKeyID   *int64
+	Kind       RequestKind
+	Query      string
+	SourceUrl  string
+	Format     MediaFormat
+	SourceID   *string
+	Title      string
+	Status     RequestStatus
+	HttpStatus *int32
+	FromCache  bool
+	TaskID     *uuid.UUID
+	Error      *string
+	DurationMs *int64
+	CreatedAt  time.Time
+}
+
+type Task struct {
+	ID              uuid.UUID
+	UserID          int64
+	ApiKeyID        *int64
+	IdempotencyKey  *string
+	RequestHash     []byte
+	Query           string
+	SourceUrl       string
+	Format          MediaFormat
+	SourceID        *string
+	Title           string
+	StorageKey      *string
+	Status          TaskStatus
+	Error           *string
+	Attempts        int32
+	LockedUntil     *time.Time
+	WebhookUrl      *string
+	WebhookState    WebhookState
+	WebhookAttempts int32
+	NextWebhookAt   *time.Time
+	WebhookError    *string
+	HistoryID       *int64
+	CreatedAt       time.Time
+	StartedAt       *time.Time
+	CompletedAt     *time.Time
+	ExpiresAt       *time.Time
 }
 
 type User struct {
-	ID           int64
-	Username     string
-	Email        string
-	Role         UserRole
-	RegisteredAt time.Time
+	ID            int64
+	Username      string
+	Email         string
+	Role          UserRole
+	RegisteredAt  time.Time
+	WebhookSecret string
 }
 
 type Video struct {
@@ -166,4 +528,5 @@ type Video struct {
 	StorageKey      *string
 	LastUploadedAt  time.Time
 	CreatedAt       time.Time
+	LastRequestedAt time.Time
 }

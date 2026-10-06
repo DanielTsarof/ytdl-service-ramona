@@ -4,48 +4,99 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Go service (module `github.com/DanielTsarof/ytdl-service-ramona`, Go 1.25.1) that downloads media with yt-dlp and serves it as MP4/MP3/WAV files or live-transcoded streams. So far only the core module exists; there is no HTTP layer or `cmd/` entrypoint yet. Much of the yt-dlp/ffmpeg logic was ported from the Ramona-go Discord bot (`../Ramona-go/modules/music`).
+Go service (module `github.com/DanielTsarof/ytdl-service-ramona`, Go 1.25.1) that downloads media with yt-dlp and serves it over an HTTP API (Gin) as MP4/MP3/WAV files, live-transcoded streams, or async tasks delivered by webhook. Much of the yt-dlp/ffmpeg logic was ported from the Ramona-go Discord bot (`../Ramona-go/modules/music`).
 
-Runtime requirements: `yt-dlp` and `ffmpeg`/`ffprobe` on PATH, and PostgreSQL (`DATABASE_URL`).
+Runtime requirements: `yt-dlp` and `ffmpeg`/`ffprobe` on PATH, PostgreSQL, and Redis. All settings are in `.env.example`.
 
 ## Commands
 
+- Run: `go run ./cmd/ytdl-service` (reads env or `.env`; migrates the DB on startup)
 - Build / vet: `go build ./... && go vet ./... && go vet -tags integration ./...`
-- Unit tests (no network; ffmpeg tests skip if ffmpeg is missing): `go test ./...`
-- Single test: `go test ./internal/media -run '^TestStreamLive$' -v`
-- Integration (real yt-dlp + YouTube): `go test -tags integration ./internal/media -run Integration -v` (`INTEGRATION_URL`, `YTDLP_COOKIES` optional)
+- Unit tests (no services, no network; ffmpeg tests skip without ffmpeg): `go test ./...`
+- Single test: `go test ./internal/api -run '^TestTaskLifecycleAndIdempotency$' -v`
+- Tests that need Postgres and Redis (skipped unless set). Each test creates and drops its own database, so the role needs CREATEDB. The Redis database in `TEST_REDIS_URL` is **flushed** by every API test:
+  ```
+  docker run -d --rm --name ytdl-pg-test -e POSTGRES_PASSWORD=test -p 15432:5432 postgres:17-alpine
+  docker run -d --rm --name ytdl-redis-test -p 16379:6379 redis:7-alpine
+  TEST_DATABASE_URL='postgres://postgres:test@localhost:15432/postgres?sslmode=disable' \
+  TEST_REDIS_URL='redis://localhost:16379/15' go test -race ./...
+  ```
+- Integration (real yt-dlp + YouTube): `go test -tags integration ./internal/media -run Integration -v` (`INTEGRATION_URL` and `YTDLP_COOKIES` are optional)
 - S3 conformance (skipped unless set): `S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=ytdl-test AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... go test ./internal/storage/s3`
-
-- DB tests (skipped unless set; each test creates and drops its own database, so the role needs CREATEDB):
-  `docker run -d --rm --name ytdl-pg-test -e POSTGRES_PASSWORD=test -p 15432:5432 postgres:17-alpine`
-  `TEST_DATABASE_URL='postgres://postgres:test@localhost:15432/postgres?sslmode=disable' go test ./internal/db -v`
 - Regenerate sqlc code after editing `internal/db/queries/*.sql` or migrations: `go generate ./internal/db` (needs cgo; sqlc runs via `go run` at a pinned version and is not in go.mod)
 
-Keep the `go` directive at 1.25.1: `go get ...@latest` can pull deps that bump it, so pin such deps instead. Use `GOTOOLCHAIN=local` to catch this. Current pins held back for this reason: `golang.org/x/sync` v0.20.0, `pressly/goose/v3` v3.27.0 (v3.27.1+ needs 1.25.7), sqlc v1.30.0 (v1.31+ needs 1.26).
+Keep the `go` directive at 1.25.1: `go get ...@latest` can pull deps that bump it, so pin such deps instead, and use `GOTOOLCHAIN=local` to catch this. Current pins held back for this reason:
+- `golang.org/x/sync` v0.20.0
+- `pressly/goose/v3` v3.27.0 (v3.27.1+ needs 1.25.7)
+- `redis/go-redis/v9` v9.22.0 (v9.23+ needs 1.26)
+- sqlc v1.30.0 (v1.31+ needs 1.26)
 
 ## Architecture
 
-The flow is `media.Service` (in `internal/media`), which drives `ytdl`, `ffmpeg` and `storage`:
+The layers, top to bottom: `cmd/ytdl-service` (wiring and shutdown) → `internal/api` (Gin handlers and middleware) and `internal/jobs` (background work) → `internal/app` (retrieval logic shared by both) → `internal/media`, `internal/storage`, `internal/db` and `internal/cache`.
 
-1. `Service.Resolve(ctx, query, format)` runs yt-dlp `--dump-json` and returns a `Source`. The source holds direct stream URLs (1 input, or video+audio as 2 inputs), the storage key `media/<videoID>/<fmt>.<ext>`, and `Stored` if the key already exists. Resolve also rejects live streams and anything over `MaxDuration`. Resolving is separate from acting so an HTTP layer can set headers before the first byte.
-2. `Service.Fetch(ctx, src)` makes sure the file is in storage. yt-dlp downloads into a per-job temp dir under `WorkDir` (yt-dlp runs ffmpeg itself to extract or merge), and the result is `Put` into storage. Concurrent fetches of one key are deduped with `singleflight`. The download runs on a context detached from the caller's (with a 30 min cap), so a disconnecting client doesn't waste a half-done download.
-3. `Service.Stream(ctx, src, w)` copies from storage if the file is stored. Otherwise it pipes a live ffmpeg transcode into `w` (fragmented MP4 / MP3 / streaming WAV; args are in `media/format.go`). It retries with re-resolved URLs **only if no byte has been written yet**, because restarting mid-stream would corrupt the container. Cancelling ctx kills ffmpeg.
-4. `Service.Open(ctx, key, *ByteRange)` reads stored objects for range requests.
+### Retrieval (`internal/app`, `internal/media`)
+- **`app.ParseRequest`**: `url` takes priority over `name` (a search query), and `format` is one of mp4, mp3 or wav.
+- **`app.Locate`** first looks for a cheap video ID: a YouTube URL is parsed with `app.YouTubeID`, any other URL is looked up in the catalog by `url`, and a name is looked up in the Redis resolve cache. If that ID's file is in storage (`media.Service.Lookup`), yt-dlp never runs. Otherwise it calls `media.Service.Resolve`, which enforces the duration and live-stream limits.
+- **`app.Get`** = Locate, then `Fetch`, then `Record`:
+  - `Fetch` downloads only if the file isn't stored, deduped with singleflight, and reports `Downloaded`.
+  - `Record` upserts the `videos`/`audio` row after a download, or bumps `last_requested_at` on a cache hit. That timestamp is what keeps a file from idle eviction, so **every path that serves a stored file must call `Record`** (the handlers do).
+- **`media.Service`**:
+  - `Resolve` runs yt-dlp `--dump-json` and returns a `Source`: stream URLs, the storage key `media/<videoID>/<fmt>.<ext>`, and `Stored`.
+  - `Fetch` downloads via yt-dlp into `WorkDir`, then `Put`s the result into storage. The download is detached from the caller's context, with a 30-minute cap.
+  - `Stream` runs a live ffmpeg transcode; its args are in `media/format.go`. It retries only before the first byte is written.
+  - `internal/ffmpeg` logs its argv with URLs reduced to hosts, because the URLs carry signed tokens.
+- **Storage** (`internal/storage`):
+  - The interface is `Put` (unknown length), ranged `Open`, `Stat` and `Delete`, with the backends in `local` and `s3` and the factory in `backends.New`.
+  - Every backend must pass `storagetest.Run`.
+  - Key rules are in `storage.ValidateKey`.
 
-Storage (`internal/storage`): the `Storage` interface (Put with unknown length, ranged Open, Stat, Delete) plus an optional `URLSigner` (S3 presigned URLs). The backends are in `storage/local` (temp file + rename, metadata in a `<key>.meta.json` sidecar) and `storage/s3` (aws-sdk-go-v2 `transfermanager` multipart uploads, metadata values query-escaped because S3 metadata is ASCII headers). The factory is `storage/backends.New(ctx, cfg.Storage)`; it lives in its own package because the backends import `storage`. Every backend must pass `storage/storagetest.Run`, and new backends should add a conformance test calling it. Key rules are in `storage.ValidateKey`, shared by all backends.
+### HTTP API (`internal/api`)
+- **Routes** are all in `server.go`.
+  - Auth: `Authorization: Bearer ytdl_…` or `X-API-Key`.
+  - Everything under the `admin` group requires the admin role. That covers **all** data-modifying CRUD and anything the caller doesn't own.
+  - Users get `/files`, `/stream`, `/tasks`, `/me` and their own `/history`.
+- **Middleware** order on `/v1` is: authenticate, then the rate limit (GCRA via `redis_rate`, per API key, fails open if Redis is down), then the handler.
+- **Read cache**: `cached(scope)` stores JSON GET responses in Redis.
+  - The key includes the caller's user ID and role, the path, the sorted query, and the scope's generation.
+  - Writes must invalidate: call `cache.Bump(scope)` with `users`, `media`, `history:<uid>` or `history:all`. Forgetting this serves stale data until `CACHE_TTL` runs out.
+  - Never put secrets behind `cached`; webhook secrets and newly issued keys are `no-store`.
+- **Serving files**: `serve.go` adapts storage to an `io.ReadSeeker` for `http.ServeContent`, which provides Range, If-None-Match, If-Range and HEAD. Live streams go through `flushWriter`; once a byte is written, errors can no longer be returned as JSON.
+- **Errors** are always `{"error":{"code","message"}}` via `abort` and `fail`. `classify` maps sentinel errors to statuses, so unknown errors become a 500 without leaking detail. yt-dlp failures are wrapped by `upstream()` and become 502.
+- **Response types**: handlers never serialise `dbgen` structs, because `User` contains `webhook_secret`. Use the types in `dto.go`.
+- **Request history** (`startHistory`/`finishHistory`) records `/files`, `/stream` and `POST /tasks`. For tasks, the worker finishes the row.
+- **Idempotency** for `POST /tasks`:
+  - With an `Idempotency-Key`, a repeat returns the same task; the same key with a different body returns 422.
+  - Without a key, `request_hash` dedupes an identical request while its task is running or its result is still downloadable.
+  - GET retrieval is idempotent by nature.
 
-`internal/ffmpeg` builds argv (reconnect/`-rw_timeout` flags for URL inputs) and logs it with URLs reduced to hosts, because googlevideo URLs carry signed tokens. Keep that redaction when touching logging.
+### Background jobs (`internal/jobs`, one `Runner`)
+- **Task workers**:
+  - Workers claim tasks with `ClaimTask` (`FOR UPDATE SKIP LOCKED`) and keep a lease alive with a heartbeat.
+  - A task whose lease expires is reclaimed, up to 3 attempts; then `FailAbandonedTasks` marks it failed.
+  - On shutdown, running tasks are left to their lease, not failed.
+  - A finished task's file is downloadable until `expires_at` (`TASK_RESULT_TTL`).
+- **Webhooks**:
+  - The file is spooled to a temp file to compute its sha256, then POSTed with `X-Ytdl-Signature: t=…,v1=hex(HMAC-SHA256(user.webhook_secret, "<t>.<task_id>.<sha256>"))`. `Sign` and `VerifySignature` are the reference implementations.
+  - Retries back off; failed tasks send a JSON `task.failed` event.
+  - The SSRF guard lives in `NewWebhookClient`: a dial-time IP check, no redirects, no proxy. `WEBHOOK_ALLOW_PRIVATE=true` turns it off, for dev and tests only.
+- **Cleanup**: `CleanupOnce` runs under a pg advisory lock, so only one instance does it. It deletes files whose `last_requested_at` is older than `FILE_IDLE_TTL` and clears their `storage_key`, keeping the catalog row. Files pinned by an unexpired task are skipped.
 
-Database (`internal/db`) uses pgx/v5, sqlc and goose:
-- **Migrations** are `migrations/0000N_name.sql` with `-- +goose Up` and `-- +goose Down` sections. They are embedded into the binary and applied by `DB.Migrate`; `DB.MigrateDownTo` is for tests and recovery. The same files also work with the goose CLI. Every migration needs a working Down, because `TestMigrateUpDownUp` checks it.
-- **Queries** live in `queries/*.sql`, and sqlc generates `dbgen/` from them. Never edit `dbgen/` by hand. `DB` embeds `*dbgen.Queries`, so generated methods are called on it directly; `InTx` wraps them in a transaction.
-- **sqlc settings**: nullable columns map to pointers (`*string`, `*time.Time`) and `timestamptz` maps to `time.Time`; both are set in `sqlc.yaml`.
-- **Schema**:
-  - `videos` holds MP4 rows, unique on `source_id`.
-  - `audio` holds one row per `(source_id, format)`, with format `mp3` or `wav`.
-  - Media rows are keyed by the yt-dlp video ID, the same ID `media.Key` uses, not by URL. `storage_key` is NULL when the file isn't stored, and an upsert refreshes `last_uploaded_at`.
-  - `users` has a unique username, a case-insensitive unique email (matched with `lower(email)`), and a `user_role` enum (`user` or `admin`).
-  - `api_keys` belongs to a user and stores only `sha256(key)`. The plaintext key looks like `ytdl_…` and is returned once, by `DB.CreateAPIKey(email, name)`. `DB.Authenticate` returns `ErrInvalidAPIKey` for unknown and revoked keys alike.
-- Generated queries return `pgx.ErrNoRows` for missing rows. Use `db.IsNotFound(err)`, which accepts that and `db.ErrNotFound`.
-
-Config is env/`.env` via cleanenv (`internal/config`): `DATABASE_URL` (required; the startup log shows only user@host:port/db), `STORAGE_BACKEND=local|s3`, `STORAGE_LOCAL_DIR`, `S3_BUCKET/REGION/ENDPOINT/PATH_STYLE/PREFIX` (credentials from the standard AWS chain), `WORK_DIR`, `MAX_DURATION_SECONDS`, `YTDLP_COOKIES`, `LOG_LEVEL`, `LOG_FORMAT`.
+### Database (`internal/db`: pgx/v5, sqlc, goose)
+- **Migrations** are `migrations/0000N_name.sql` with Up and Down sections. They are embedded and applied by `DB.Migrate` at startup. Every migration needs a working Down, because `TestMigrateUpDownUp` checks it.
+- **Queries** are in `queries/*.sql`, and `dbgen/` is generated from them; never edit `dbgen/` by hand.
+  - Don't mix `$N` and `sqlc.arg()` in one query.
+  - Optional filters use `sqlc.narg` with `IS NULL OR`.
+  - Durations are passed as seconds and added to `now()` in SQL, so the database clock is the only clock.
+- **sqlc type mappings**:
+  - Nullable columns map to pointers.
+  - `uuid` maps to `google/uuid`.
+  - `timestamptz` maps to `time.Time`.
+- **Tables**:
+  - `videos` (mp4) and `audio` (mp3/wav), keyed by yt-dlp video ID, with `storage_key` NULL when not stored.
+  - `users`: role `user` or `admin`, plus a per-user `webhook_secret`.
+  - `api_keys`: stores only sha256(key).
+  - `tasks`
+  - `request_history`
+- **Helpers**: `db.IsNotFound(err)` covers `pgx.ErrNoRows`. `db.Principal` is the authenticated caller. `db.BootstrapAdmin` creates the first admin from `BOOTSTRAP_ADMIN_*`.
+- `internal/db/dbtest.New(t)` gives other packages a throwaway migrated database.

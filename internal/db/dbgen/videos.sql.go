@@ -7,6 +7,7 @@ package dbgen
 
 import (
 	"context"
+	"time"
 )
 
 const clearVideoStorageKey = `-- name: ClearVideoStorageKey :execrows
@@ -22,6 +23,17 @@ func (q *Queries) ClearVideoStorageKey(ctx context.Context, sourceID string) (in
 	return result.RowsAffected(), nil
 }
 
+const countVideos = `-- name: CountVideos :one
+SELECT count(*) FROM videos
+`
+
+func (q *Queries) CountVideos(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countVideos)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteVideo = `-- name: DeleteVideo :execrows
 DELETE FROM videos WHERE source_id = $1
 `
@@ -35,7 +47,7 @@ func (q *Queries) DeleteVideo(ctx context.Context, sourceID string) (int64, erro
 }
 
 const getVideoBySourceID = `-- name: GetVideoBySourceID :one
-SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at FROM videos WHERE source_id = $1
+SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM videos WHERE source_id = $1
 `
 
 func (q *Queries) GetVideoBySourceID(ctx context.Context, sourceID string) (Video, error) {
@@ -50,12 +62,84 @@ func (q *Queries) GetVideoBySourceID(ctx context.Context, sourceID string) (Vide
 		&i.StorageKey,
 		&i.LastUploadedAt,
 		&i.CreatedAt,
+		&i.LastRequestedAt,
 	)
 	return i, err
 }
 
+const getVideoByURL = `-- name: GetVideoByURL :one
+SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM videos WHERE url = $1 ORDER BY last_requested_at DESC LIMIT 1
+`
+
+func (q *Queries) GetVideoByURL(ctx context.Context, url string) (Video, error) {
+	row := q.db.QueryRow(ctx, getVideoByURL, url)
+	var i Video
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.Url,
+		&i.Title,
+		&i.DurationSeconds,
+		&i.StorageKey,
+		&i.LastUploadedAt,
+		&i.CreatedAt,
+		&i.LastRequestedAt,
+	)
+	return i, err
+}
+
+const listIdleVideos = `-- name: ListIdleVideos :many
+SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM videos v
+WHERE v.storage_key IS NOT NULL
+  AND v.last_requested_at < $1::timestamptz
+  AND NOT EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.storage_key = v.storage_key
+        AND (t.expires_at IS NULL OR t.expires_at > now())
+        AND t.status IN ('queued', 'running', 'succeeded'))
+ORDER BY v.last_requested_at
+LIMIT $2
+`
+
+type ListIdleVideosParams struct {
+	Cutoff    time.Time
+	BatchSize int32
+}
+
+// Stored files not requested since the cutoff and not pinned by a task whose
+// result is still downloadable.
+func (q *Queries) ListIdleVideos(ctx context.Context, arg ListIdleVideosParams) ([]Video, error) {
+	rows, err := q.db.Query(ctx, listIdleVideos, arg.Cutoff, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Video
+	for rows.Next() {
+		var i Video
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.Url,
+			&i.Title,
+			&i.DurationSeconds,
+			&i.StorageKey,
+			&i.LastUploadedAt,
+			&i.CreatedAt,
+			&i.LastRequestedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVideos = `-- name: ListVideos :many
-SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at FROM videos
+SELECT id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at FROM videos
 ORDER BY last_uploaded_at DESC, id DESC
 LIMIT $1 OFFSET $2
 `
@@ -83,6 +167,7 @@ func (q *Queries) ListVideos(ctx context.Context, arg ListVideosParams) ([]Video
 			&i.StorageKey,
 			&i.LastUploadedAt,
 			&i.CreatedAt,
+			&i.LastRequestedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -94,6 +179,19 @@ func (q *Queries) ListVideos(ctx context.Context, arg ListVideosParams) ([]Video
 	return items, nil
 }
 
+const touchVideoRequested = `-- name: TouchVideoRequested :execrows
+UPDATE videos SET last_requested_at = now() WHERE source_id = $1
+`
+
+// Called whenever a stored file is served; keeps it from idle eviction.
+func (q *Queries) TouchVideoRequested(ctx context.Context, sourceID string) (int64, error) {
+	result, err := q.db.Exec(ctx, touchVideoRequested, sourceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const upsertVideo = `-- name: UpsertVideo :one
 INSERT INTO videos (source_id, url, title, duration_seconds, storage_key)
 VALUES ($1, $2, $3, $4, $5)
@@ -102,8 +200,9 @@ SET url              = EXCLUDED.url,
     title            = EXCLUDED.title,
     duration_seconds = EXCLUDED.duration_seconds,
     storage_key      = EXCLUDED.storage_key,
-    last_uploaded_at = now()
-RETURNING id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at
+    last_uploaded_at = now(),
+    last_requested_at = now()
+RETURNING id, source_id, url, title, duration_seconds, storage_key, last_uploaded_at, created_at, last_requested_at
 `
 
 type UpsertVideoParams struct {
@@ -134,6 +233,7 @@ func (q *Queries) UpsertVideo(ctx context.Context, arg UpsertVideoParams) (Video
 		&i.StorageKey,
 		&i.LastUploadedAt,
 		&i.CreatedAt,
+		&i.LastRequestedAt,
 	)
 	return i, err
 }

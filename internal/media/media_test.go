@@ -242,8 +242,30 @@ func TestFetchReturnsStoredWithoutDownloading(t *testing.T) {
 	svc, _ := newService(t)
 	obj := storage.ObjectInfo{Key: "media/x/mp3.mp3", Size: 3}
 	got, err := svc.Fetch(context.Background(), Source{Stored: &obj})
-	if err != nil || got.Key != obj.Key {
+	if err != nil || got.Object.Key != obj.Key || got.Downloaded {
 		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestLookup(t *testing.T) {
+	svc, store := newService(t)
+	ctx := context.Background()
+	if _, ok, err := svc.Lookup(ctx, "x", MP3); ok || err != nil {
+		t.Fatalf("missing file: ok=%v err=%v", ok, err)
+	}
+	_, err := store.Put(ctx, Key("x", MP3), strings.NewReader("data"), storage.ObjectInfo{
+		ContentType: MP3.MIME(),
+		Meta:        map[string]string{"title": "T", "source-url": "https://youtu.be/x", "duration": "42"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, ok, err := svc.Lookup(ctx, "x", MP3)
+	if err != nil || !ok || src.Stored == nil {
+		t.Fatalf("stored file: ok=%v err=%v", ok, err)
+	}
+	if src.Info.Title != "T" || src.Info.WebpageURL != "https://youtu.be/x" || src.Info.Duration != 42 || src.Key != Key("x", MP3) {
+		t.Fatalf("src = %+v", src)
 	}
 }
 

@@ -51,10 +51,14 @@ func TestIntegrationFetchAllFormats(t *testing.T) {
 			if src.Stored != nil {
 				t.Fatal("fresh store reports a cached object")
 			}
-			obj, err := svc.Fetch(ctx, src)
+			fetched, err := svc.Fetch(ctx, src)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if !fetched.Downloaded {
+				t.Fatal("first Fetch did not download")
+			}
+			obj := fetched.Object
 			if obj.Size == 0 || obj.ContentType != f.MIME() || obj.Meta["video-id"] != src.Info.ID {
 				t.Fatalf("stored object = %+v", obj)
 			}

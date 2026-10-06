@@ -314,9 +314,9 @@ func TestAPIKeys(t *testing.T) {
 		t.Fatal("plaintext key found in key_hash")
 	}
 
-	user, err := d.Authenticate(ctx, plain)
-	if err != nil || user.ID != alice.ID {
-		t.Fatalf("authenticate: %+v, %v", user, err)
+	principal, err := d.Authenticate(ctx, plain)
+	if err != nil || principal.User.ID != alice.ID || principal.KeyID != key.ID || principal.KeyPrefix != key.Prefix {
+		t.Fatalf("authenticate: %+v, %v", principal, err)
 	}
 	keys, err := d.ListAPIKeysByUser(ctx, alice.ID)
 	if err != nil || len(keys) != 1 || keys[0].LastUsedAt == nil {

@@ -53,16 +53,53 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 	return i, err
 }
 
+const getAPIKeyForUser = `-- name: GetAPIKeyForUser :one
+SELECT id, user_id, prefix, name, created_at, last_used_at, revoked_at
+FROM api_keys
+WHERE id = $1 AND user_id = $2
+`
+
+type GetAPIKeyForUserParams struct {
+	ID     int64
+	UserID int64
+}
+
+type GetAPIKeyForUserRow struct {
+	ID         int64
+	UserID     int64
+	Prefix     string
+	Name       string
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
+}
+
+func (q *Queries) GetAPIKeyForUser(ctx context.Context, arg GetAPIKeyForUserParams) (GetAPIKeyForUserRow, error) {
+	row := q.db.QueryRow(ctx, getAPIKeyForUser, arg.ID, arg.UserID)
+	var i GetAPIKeyForUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Prefix,
+		&i.Name,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getUserByAPIKeyHash = `-- name: GetUserByAPIKeyHash :one
-SELECT users.id, users.username, users.email, users.role, users.registered_at, api_keys.id AS api_key_id
+SELECT users.id, users.username, users.email, users.role, users.registered_at, users.webhook_secret, api_keys.id AS api_key_id, api_keys.prefix AS api_key_prefix
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.key_hash = $1 AND api_keys.revoked_at IS NULL
 `
 
 type GetUserByAPIKeyHashRow struct {
-	User     User
-	ApiKeyID int64
+	User         User
+	ApiKeyID     int64
+	ApiKeyPrefix string
 }
 
 // Resolves an active (not revoked) key to its owner.
@@ -75,7 +112,9 @@ func (q *Queries) GetUserByAPIKeyHash(ctx context.Context, keyHash []byte) (GetU
 		&i.User.Email,
 		&i.User.Role,
 		&i.User.RegisteredAt,
+		&i.User.WebhookSecret,
 		&i.ApiKeyID,
+		&i.ApiKeyPrefix,
 	)
 	return i, err
 }
@@ -139,6 +178,19 @@ type RevokeAPIKeyParams struct {
 // Scoped by user_id so one user cannot revoke another user's key.
 func (q *Queries) RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeAPIKey, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeAllAPIKeysForUser = `-- name: RevokeAllAPIKeysForUser :execrows
+UPDATE api_keys SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeAllAPIKeysForUser(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAllAPIKeysForUser, userID)
 	if err != nil {
 		return 0, err
 	}

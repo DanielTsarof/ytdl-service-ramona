@@ -94,6 +94,29 @@ func (s *Service) Resolve(ctx context.Context, query string, f Format) (Source, 
 	return src, nil
 }
 
+// Lookup builds a Source for a known video ID without running yt-dlp. ok is
+// false when the file is not in storage (the caller then falls back to
+// Resolve, which also refreshes title/duration and enforces the limits).
+func (s *Service) Lookup(ctx context.Context, id string, f Format) (src Source, ok bool, err error) {
+	key := Key(id, f)
+	obj, err := s.store.Stat(ctx, key)
+	if errors.Is(err, storage.ErrNotFound) {
+		return Source{}, false, nil
+	}
+	if err != nil {
+		return Source{}, false, fmt.Errorf("storage stat: %w", err)
+	}
+	info := ytdl.Info{ID: id}
+	if obj.Meta != nil {
+		info.Title = obj.Meta["title"]
+		info.WebpageURL = obj.Meta["source-url"]
+		if d, err := strconv.Atoi(obj.Meta["duration"]); err == nil {
+			info.Duration = d
+		}
+	}
+	return Source{Info: info, Format: f, Key: key, Stored: &obj}, true, nil
+}
+
 // Key is the storage key for video id in format f.
 func Key(id string, f Format) string {
 	return "media/" + safeID(id) + "/" + string(f) + "." + f.Ext()
@@ -114,13 +137,21 @@ func safeID(id string) string {
 	return clean
 }
 
+// Fetched is the outcome of Fetch.
+type Fetched struct {
+	Object storage.ObjectInfo
+	// Downloaded is true when this call (or the flight it joined) actually
+	// downloaded and stored the file, false when it was already stored.
+	Downloaded bool
+}
+
 // Fetch makes sure src is in storage, downloading it if needed, and returns
 // the stored object. Concurrent Fetches of the same key share one download.
 // The download runs detached from ctx: a caller that gives up only stops
 // waiting, and the finished file still lands in the cache for the next one.
-func (s *Service) Fetch(ctx context.Context, src Source) (storage.ObjectInfo, error) {
+func (s *Service) Fetch(ctx context.Context, src Source) (Fetched, error) {
 	if src.Stored != nil {
-		return *src.Stored, nil
+		return Fetched{Object: *src.Stored}, nil
 	}
 	ch := s.sf.DoChan(src.Key, func() (any, error) {
 		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
@@ -129,27 +160,27 @@ func (s *Service) Fetch(ctx context.Context, src Source) (storage.ObjectInfo, er
 	})
 	select {
 	case <-ctx.Done():
-		return storage.ObjectInfo{}, ctx.Err()
+		return Fetched{}, ctx.Err()
 	case res := <-ch:
 		if res.Err != nil {
-			return storage.ObjectInfo{}, res.Err
+			return Fetched{}, res.Err
 		}
-		return res.Val.(storage.ObjectInfo), nil
+		return res.Val.(Fetched), nil
 	}
 }
 
-func (s *Service) download(ctx context.Context, src Source) (storage.ObjectInfo, error) {
+func (s *Service) download(ctx context.Context, src Source) (Fetched, error) {
 	l := s.log.With(slog.String("key", src.Key), slog.String("title", src.Info.Title))
 
 	// A flight that finished between Resolve and now already stored it.
 	if obj, err := s.store.Stat(ctx, src.Key); err == nil {
-		return obj, nil
+		return Fetched{Object: obj}, nil
 	}
 
 	start := time.Now()
 	dir, err := os.MkdirTemp(s.opts.WorkDir, safeID(src.Info.ID)+"-*")
 	if err != nil {
-		return storage.ObjectInfo{}, fmt.Errorf("work dir: %w", err)
+		return Fetched{}, fmt.Errorf("work dir: %w", err)
 	}
 	defer func() {
 		if err := os.RemoveAll(dir); err != nil {
@@ -164,13 +195,13 @@ func (s *Service) download(ctx context.Context, src Source) (storage.ObjectInfo,
 	path, err := s.yt.Download(ctx, url, src.Format.target(), dir)
 	if err != nil {
 		l.Error("download failed", slog.Duration("elapsed", time.Since(start)), slog.Any("err", err))
-		return storage.ObjectInfo{}, err
+		return Fetched{}, err
 	}
 	downloaded := time.Since(start)
 
 	f, err := os.Open(path)
 	if err != nil {
-		return storage.ObjectInfo{}, err
+		return Fetched{}, err
 	}
 	defer f.Close()
 	obj, err := s.store.Put(ctx, src.Key, f, storage.ObjectInfo{
@@ -184,13 +215,13 @@ func (s *Service) download(ctx context.Context, src Source) (storage.ObjectInfo,
 	})
 	if err != nil {
 		l.Error("storing download failed", slog.Any("err", err))
-		return storage.ObjectInfo{}, fmt.Errorf("store: %w", err)
+		return Fetched{}, fmt.Errorf("store: %w", err)
 	}
 	l.Info("media stored",
 		slog.Int64("size", obj.Size),
 		slog.Duration("download", downloaded),
 		slog.Duration("total", time.Since(start)))
-	return obj, nil
+	return Fetched{Object: obj, Downloaded: true}, nil
 }
 
 // Open reads a stored object, optionally a byte range of it (for seeking

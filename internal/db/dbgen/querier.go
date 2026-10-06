@@ -6,33 +6,86 @@ package dbgen
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 type Querier interface {
+	// Takes the oldest queued task, or a running one whose worker lease expired
+	// (the worker died). SKIP LOCKED lets any number of workers and instances
+	// poll concurrently without handing out the same task twice.
+	ClaimTask(ctx context.Context, arg ClaimTaskParams) (Task, error)
+	// Pushes next_webhook_at forward as a delivery lease, so another poller does
+	// not pick the same webhook while this delivery is in progress.
+	ClaimWebhook(ctx context.Context, leaseSeconds float64) (Task, error)
 	// Marks the file as no longer stored (e.g. evicted); the row is kept.
 	ClearAudioStorageKey(ctx context.Context, arg ClearAudioStorageKeyParams) (int64, error)
 	// Marks the file as no longer stored (e.g. evicted); the row is kept.
 	ClearVideoStorageKey(ctx context.Context, sourceID string) (int64, error)
+	CompleteTask(ctx context.Context, arg CompleteTaskParams) (Task, error)
+	CountAudio(ctx context.Context) (int64, error)
+	CountHistory(ctx context.Context, arg CountHistoryParams) (int64, error)
+	CountUsers(ctx context.Context) (int64, error)
+	CountVideos(ctx context.Context) (int64, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (CreateAPIKeyRow, error)
+	// Returns no row when (user_id, idempotency_key) already exists; the caller
+	// then loads the existing task with GetTaskByIdempotency.
+	CreateTask(ctx context.Context, arg CreateTaskParams) (Task, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAudio(ctx context.Context, arg DeleteAudioParams) (int64, error)
 	// Cascades to the user's API keys.
 	DeleteUser(ctx context.Context, id int64) (int64, error)
 	DeleteVideo(ctx context.Context, sourceID string) (int64, error)
+	ExtendTaskLease(ctx context.Context, arg ExtendTaskLeaseParams) (int64, error)
+	// Tasks whose worker died on the last allowed attempt would otherwise stay
+	// "running" forever.
+	FailAbandonedTasks(ctx context.Context, maxAttempts int32) (int64, error)
+	FailTask(ctx context.Context, arg FailTaskParams) (Task, error)
+	// Implicit idempotency: the newest identical request that is still in flight
+	// or whose result is still downloadable.
+	FindReusableTask(ctx context.Context, arg FindReusableTaskParams) (Task, error)
+	FinishHistory(ctx context.Context, arg FinishHistoryParams) error
+	GetAPIKeyForUser(ctx context.Context, arg GetAPIKeyForUserParams) (GetAPIKeyForUserRow, error)
 	GetAudio(ctx context.Context, arg GetAudioParams) (Audio, error)
+	GetAudioByURL(ctx context.Context, arg GetAudioByURLParams) (Audio, error)
+	GetTask(ctx context.Context, id uuid.UUID) (Task, error)
+	GetTaskByIdempotency(ctx context.Context, arg GetTaskByIdempotencyParams) (Task, error)
 	// Resolves an active (not revoked) key to its owner.
 	GetUserByAPIKeyHash(ctx context.Context, keyHash []byte) (GetUserByAPIKeyHashRow, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	GetVideoBySourceID(ctx context.Context, sourceID string) (Video, error)
+	GetVideoByURL(ctx context.Context, url string) (Video, error)
+	InsertHistory(ctx context.Context, arg InsertHistoryParams) (int64, error)
 	// Never returns key_hash.
 	ListAPIKeysByUser(ctx context.Context, userID int64) ([]ListAPIKeysByUserRow, error)
 	ListAudio(ctx context.Context, arg ListAudioParams) ([]Audio, error)
+	// Every filter is optional (NULL = no filter). search must already have its
+	// LIKE wildcards escaped by the caller.
+	ListHistory(ctx context.Context, arg ListHistoryParams) ([]RequestHistory, error)
+	// Stored files not requested since the cutoff and not pinned by a task whose
+	// result is still downloadable.
+	ListIdleAudio(ctx context.Context, arg ListIdleAudioParams) ([]Audio, error)
+	// Stored files not requested since the cutoff and not pinned by a task whose
+	// result is still downloadable.
+	ListIdleVideos(ctx context.Context, arg ListIdleVideosParams) ([]Video, error)
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
 	ListVideos(ctx context.Context, arg ListVideosParams) ([]Video, error)
+	MarkWebhookDelivered(ctx context.Context, id uuid.UUID) error
+	MarkWebhookFailed(ctx context.Context, arg MarkWebhookFailedParams) error
+	MarkWebhookRetry(ctx context.Context, arg MarkWebhookRetryParams) error
 	// Scoped by user_id so one user cannot revoke another user's key.
 	RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (int64, error)
+	RevokeAllAPIKeysForUser(ctx context.Context, userID int64) (int64, error)
+	SetTaskHistory(ctx context.Context, arg SetTaskHistoryParams) error
+	SetWebhookSecret(ctx context.Context, arg SetWebhookSecretParams) (string, error)
 	TouchAPIKey(ctx context.Context, id int64) error
+	// Called whenever a stored file is served; keeps it from idle eviction.
+	TouchAudioRequested(ctx context.Context, arg TouchAudioRequestedParams) (int64, error)
+	// Called whenever a stored file is served; keeps it from idle eviction.
+	TouchVideoRequested(ctx context.Context, sourceID string) (int64, error)
+	// Partial update: NULL arguments keep the current value.
+	UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error)
 	UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) (User, error)
 	// Records an upload to storage; a repeat upload of the same video in the same
 	// format refreshes the row and its last_uploaded_at.

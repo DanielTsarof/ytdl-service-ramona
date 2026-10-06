@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -30,6 +31,51 @@ type Config struct {
 	LogFormat string `env:"LOG_FORMAT" env-default:"text"`
 
 	Storage Storage
+	HTTP    HTTP
+	Jobs    Jobs
+	Limits  Limits
+	Admin   BootstrapAdmin
+}
+
+type HTTP struct {
+	Addr string `env:"HTTP_ADDR" env-default:":8080"`
+	// RedisURL backs rate limiting and the read cache.
+	RedisURL string `env:"REDIS_URL" env-default:"redis://localhost:6379/0"`
+}
+
+type Jobs struct {
+	// FileIdleTTL: stored files not requested for this long are deleted
+	// ("Time N"). Go duration syntax, e.g. 168h = 7 days.
+	FileIdleTTL time.Duration `env:"FILE_IDLE_TTL" env-default:"168h"`
+	// CleanupInterval: how often the idle-file cleanup runs.
+	CleanupInterval time.Duration `env:"CLEANUP_INTERVAL" env-default:"1h"`
+	// TaskResultTTL: how long a finished task's file can be downloaded by task ID.
+	TaskResultTTL time.Duration `env:"TASK_RESULT_TTL" env-default:"1h"`
+	TaskWorkers   int           `env:"TASK_WORKERS" env-default:"4"`
+	// TaskLease: a worker that stops heartbeating for this long is presumed
+	// dead and its task is handed to another worker.
+	TaskLease          time.Duration `env:"TASK_LEASE" env-default:"2m"`
+	WebhookTimeout     time.Duration `env:"WEBHOOK_TIMEOUT" env-default:"60s"`
+	WebhookMaxAttempts int           `env:"WEBHOOK_MAX_ATTEMPTS" env-default:"6"`
+	// WebhookAllowPrivate disables the SSRF guard that blocks webhook
+	// deliveries to loopback/private/link-local addresses. Dev and tests only.
+	WebhookAllowPrivate bool `env:"WEBHOOK_ALLOW_PRIVATE" env-default:"false"`
+}
+
+type Limits struct {
+	// RateLimitPerMinute and RateLimitBurst apply per API key.
+	RateLimitPerMinute int `env:"RATE_LIMIT_PER_MINUTE" env-default:"60"`
+	RateLimitBurst     int `env:"RATE_LIMIT_BURST" env-default:"20"`
+	// CacheTTL bounds how stale a cached read (lists, history) can be.
+	CacheTTL time.Duration `env:"CACHE_TTL" env-default:"30s"`
+}
+
+// BootstrapAdmin creates the first administrator on startup when no user has
+// Email yet. APIKey is optional: if empty, a key is generated and logged once.
+type BootstrapAdmin struct {
+	Username string `env:"BOOTSTRAP_ADMIN_USERNAME" env-default:"admin"`
+	Email    string `env:"BOOTSTRAP_ADMIN_EMAIL"`
+	APIKey   string `env:"BOOTSTRAP_ADMIN_API_KEY"`
 }
 
 // Storage selects and configures the backend finished files are saved to.
@@ -86,6 +132,21 @@ func (c *Config) LogAttrs() []any {
 		slog.String("s3_endpoint", c.Storage.S3Endpoint),
 		slog.Bool("s3_path_style", c.Storage.S3PathStyle),
 		slog.String("s3_prefix", c.Storage.S3Prefix),
+		slog.String("http_addr", c.HTTP.Addr),
+		slog.String("redis", redisLabel(c.HTTP.RedisURL)),
+		slog.Duration("file_idle_ttl", c.Jobs.FileIdleTTL),
+		slog.Duration("cleanup_interval", c.Jobs.CleanupInterval),
+		slog.Duration("task_result_ttl", c.Jobs.TaskResultTTL),
+		slog.Int("task_workers", c.Jobs.TaskWorkers),
+		slog.Duration("task_lease", c.Jobs.TaskLease),
+		slog.Duration("webhook_timeout", c.Jobs.WebhookTimeout),
+		slog.Int("webhook_max_attempts", c.Jobs.WebhookMaxAttempts),
+		slog.Bool("webhook_allow_private", c.Jobs.WebhookAllowPrivate),
+		slog.Int("rate_limit_per_minute", c.Limits.RateLimitPerMinute),
+		slog.Int("rate_limit_burst", c.Limits.RateLimitBurst),
+		slog.Duration("cache_ttl", c.Limits.CacheTTL),
+		slog.String("bootstrap_admin_email", c.Admin.Email),
+		slog.Bool("bootstrap_admin_api_key_set", c.Admin.APIKey != ""),
 	}
 }
 
@@ -100,4 +161,36 @@ func databaseLabel(dsn string) string {
 		return "unparseable"
 	}
 	return fmt.Sprintf("%s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
+}
+
+// redisLabel renders a Redis URL without its password.
+func redisLabel(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "unparseable"
+	}
+	return u.Redacted()
+}
+
+// Validate rejects settings that would make the service misbehave quietly.
+func (c *Config) Validate() error {
+	switch {
+	case c.Jobs.FileIdleTTL <= 0:
+		return fmt.Errorf("FILE_IDLE_TTL must be positive")
+	case c.Jobs.CleanupInterval <= 0:
+		return fmt.Errorf("CLEANUP_INTERVAL must be positive")
+	case c.Jobs.TaskResultTTL <= 0:
+		return fmt.Errorf("TASK_RESULT_TTL must be positive")
+	case c.Jobs.TaskWorkers < 1:
+		return fmt.Errorf("TASK_WORKERS must be at least 1")
+	case c.Jobs.TaskLease < 10*time.Second:
+		return fmt.Errorf("TASK_LEASE must be at least 10s")
+	case c.Jobs.WebhookMaxAttempts < 1:
+		return fmt.Errorf("WEBHOOK_MAX_ATTEMPTS must be at least 1")
+	case c.Limits.RateLimitPerMinute < 1:
+		return fmt.Errorf("RATE_LIMIT_PER_MINUTE must be at least 1")
+	case c.Limits.RateLimitBurst < 1:
+		return fmt.Errorf("RATE_LIMIT_BURST must be at least 1")
+	}
+	return nil
 }
